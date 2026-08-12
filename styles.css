@@ -1,0 +1,740 @@
+/*
+ * styles.css
+ *
+ * Mobile-first layout for the card counting trainer.
+ *
+ * Ground rules, because the previous UI broke all of them:
+ *   - No fixed pixel card sizes. Cards scale from a single --card-w custom
+ *     property driven by clamp(), so they fit a small phone and a tablet.
+ *   - Nothing depends on :hover. Every control is reachable by touch.
+ *   - The layout is a flex column pinned to the dynamic viewport height, so
+ *     mobile browser chrome appearing/disappearing doesn't clip the buttons.
+ *   - Safe-area insets are honoured for notches and home indicators.
+ */
+
+/* ---------- design tokens ---------- */
+
+:root {
+  --felt: #14532d;
+  --felt-dark: #0f3d22;
+  --bg: #0f1b14;
+  --surface: #16241c;
+  --surface-raised: #1e3327;
+  --border: #2c4536;
+
+  --text: #f1f5f2;
+  --text-dim: #9db3a5;
+  --text-faint: #6b8377;
+
+  --gold: #d4af37;
+  --win: #4ade80;
+  --lose: #f87171;
+  --push: #94a3b8;
+  --accent: #38bdf8;
+
+  --card-red: #d21f3c;
+  --card-black: #1a1a1a;
+  --card-face: #fdfdf8;
+
+  /* Card width scales with the viewport but never gets unusably small or huge */
+  --card-w: clamp(3rem, 15vw, 5.25rem);
+  --card-h: calc(var(--card-w) * 1.4);
+  --card-radius: calc(var(--card-w) * 0.09);
+
+  /* Minimum comfortable touch target */
+  --tap: 2.875rem;
+
+  --radius: 0.75rem;
+  --pad: 0.75rem;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* ---------- reset ---------- */
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  /* Stop iOS bumping font sizes when the phone is rotated */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  overscroll-behavior: none;
+  /* Kill the grey tap flash and accidental text selection during play */
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+/* ---------- boot state ---------- */
+
+.boot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  height: 100dvh;
+  color: var(--text-dim);
+}
+
+.boot__spinner {
+  width: 2rem;
+  height: 2rem;
+  border: 3px solid var(--border);
+  border-top-color: var(--gold);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- app frame ---------- */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  overflow: hidden;
+}
+
+/* ---------- status bar ---------- */
+
+.status {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem var(--pad);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.status__stat {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.status__stat--right { text-align: right; }
+
+.status__label {
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.status__value {
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.status__value--money { color: var(--gold); }
+
+/* The count is the thing being trained, so it can be hidden behind a tap */
+.count {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  min-height: var(--tap);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.count__group { text-align: center; line-height: 1.1; }
+
+.count__value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  transition: filter 0.15s ease;
+}
+
+.count__value--pos { color: var(--win); }
+.count__value--neg { color: var(--lose); }
+.count__value--zero { color: var(--text-dim); }
+
+.count.is-hidden .count__value {
+  filter: blur(0.5rem);
+  /* Blur alone can be reverse-engineered from the glyph shape, so flatten it */
+  color: var(--text-dim);
+}
+
+/* ---------- shoe penetration ---------- */
+
+.shoe {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem var(--pad);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.6875rem;
+  color: var(--text-faint);
+}
+
+.shoe__track {
+  flex: 1;
+  height: 0.3rem;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.shoe__fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--gold));
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+
+.shoe__fill--deep { background: linear-gradient(90deg, var(--gold), var(--lose)); }
+
+/* ---------- felt ---------- */
+
+.felt {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: var(--pad);
+  background:
+    radial-gradient(ellipse at 50% 30%, var(--felt) 0%, var(--felt-dark) 70%, var(--bg) 100%);
+  /* Long hands (many splits) scroll rather than pushing the buttons off screen */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.seat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.seat__label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.seat__total {
+  padding: 0.1rem 0.45rem;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+.seat__total--bust { background: var(--lose); color: #2a0a0a; }
+.seat__total--soft { color: var(--accent); }
+
+/* ---------- hands and cards ---------- */
+
+.hands {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.hand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem;
+  border: 2px solid transparent;
+  border-radius: var(--radius);
+  transition: border-color 0.2s ease, opacity 0.2s ease;
+}
+
+.hand.is-active {
+  border-color: var(--gold);
+  background: rgba(212, 175, 55, 0.08);
+}
+
+.hand.is-settled { opacity: 0.55; }
+
+.hand__cards {
+  display: flex;
+  /* Overlap cards so a five-card hand still fits a narrow screen */
+  padding-left: calc(var(--card-w) * 0.45);
+}
+
+.hand__cards > * {
+  margin-left: calc(var(--card-w) * -0.45);
+}
+
+.hand__bet {
+  font-size: 0.75rem;
+  font-weight: 650;
+  color: var(--gold);
+}
+
+.card {
+  position: relative;
+  flex: 0 0 auto;
+  width: var(--card-w);
+  height: var(--card-h);
+  border-radius: var(--card-radius);
+  background: var(--card-face);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.25);
+  animation: deal 0.25s ease-out backwards;
+}
+
+@keyframes deal {
+  from { opacity: 0; transform: translateY(-1.5rem) scale(0.85); }
+  to { opacity: 1; transform: none; }
+}
+
+.card__corner {
+  position: absolute;
+  top: 4%;
+  left: 6%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 0.95;
+  font-weight: 700;
+  font-size: calc(var(--card-w) * 0.3);
+}
+
+.card__pip {
+  font-size: calc(var(--card-w) * 0.52);
+  line-height: 1;
+}
+
+.card__center {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: calc(var(--card-w) * 0.5);
+}
+
+.card--red { color: var(--card-red); }
+.card--black { color: var(--card-black); }
+
+.card--back {
+  background:
+    repeating-linear-gradient(45deg, #1c4f7c 0 6px, #163f63 6px 12px);
+  box-shadow: inset 0 0 0 3px var(--card-face), 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+/* ---------- advice line ---------- */
+
+.advice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.25rem;
+  padding: 0.4rem var(--pad);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+.advice__play {
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.advice__tag {
+  padding: 0.1rem 0.4rem;
+  background: var(--gold);
+  color: #2a2100;
+  border-radius: 999px;
+  font-size: 0.625rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.advice--correct { color: var(--win); }
+.advice--wrong { color: var(--lose); }
+
+/* ---------- controls ---------- */
+
+.controls {
+  flex: 0 0 auto;
+  padding: var(--pad);
+  padding-bottom: calc(var(--pad) + var(--safe-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr));
+  gap: 0.5rem;
+}
+
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--tap);
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.875rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  transition: transform 0.08s ease, background 0.15s ease;
+}
+
+.btn:active { transform: scale(0.96); }
+
+.btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.btn:disabled:active { transform: none; }
+
+.btn--primary {
+  background: var(--gold);
+  border-color: var(--gold);
+  color: #2a2100;
+}
+
+.btn--danger { border-color: rgba(248, 113, 113, 0.4); color: var(--lose); }
+.btn--wide { grid-column: 1 / -1; }
+
+/* The recommended action gets a ring, but only in hint mode */
+.btn.is-hinted {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* ---------- betting ---------- */
+
+.betting { display: flex; flex-direction: column; gap: 0.6rem; }
+
+.betting__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.betting__amount {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+.betting__hint {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.chip {
+  display: grid;
+  place-items: center;
+  width: var(--tap);
+  height: var(--tap);
+  border-radius: 50%;
+  border: 3px dashed rgba(255, 255, 255, 0.6);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #10231a;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.45);
+  transition: transform 0.08s ease;
+}
+
+.chip:active { transform: scale(0.92); }
+.chip:disabled { opacity: 0.3; }
+
+/* ---------- result banner ---------- */
+
+.banner {
+  position: fixed;
+  left: 50%;
+  top: 38%;
+  transform: translate(-50%, -50%);
+  padding: 0.75rem 1.5rem;
+  border-radius: var(--radius);
+  background: rgba(0, 0, 0, 0.85);
+  border: 2px solid var(--border);
+  font-size: 1.25rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  text-align: center;
+  pointer-events: none;
+  animation: pop 0.3s ease-out;
+  z-index: 50;
+}
+
+.banner--win { border-color: var(--win); color: var(--win); }
+.banner--lose { border-color: var(--lose); color: var(--lose); }
+.banner--push { border-color: var(--push); color: var(--push); }
+.banner--blackjack { border-color: var(--gold); color: var(--gold); }
+
+.banner__amount {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-dim);
+}
+
+@keyframes pop {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.85); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+/* ---------- bottom sheet ---------- */
+
+.sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.sheet[hidden] { display: none; }
+
+.sheet__panel {
+  max-height: 85dvh;
+  padding: var(--pad);
+  padding-bottom: calc(var(--pad) + var(--safe-bottom));
+  background: var(--surface);
+  border-radius: 1rem 1rem 0 0;
+  border-top: 1px solid var(--border);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: slide-up 0.22s ease-out;
+  /* Let users select text in stats/help panels even though the table can't be */
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to { transform: none; }
+}
+
+.sheet__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.sheet__title { font-size: 1.0625rem; font-weight: 700; }
+
+.sheet__close {
+  display: grid;
+  place-items: center;
+  width: var(--tap);
+  height: var(--tap);
+  margin: calc(var(--tap) / -4);
+  border-radius: 50%;
+  font-size: 1.25rem;
+  color: var(--text-dim);
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: var(--tap);
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.field:last-child { border-bottom: none; }
+
+.field__label { font-size: 0.875rem; }
+
+.field__hint {
+  display: block;
+  margin-top: 0.1rem;
+  font-size: 0.6875rem;
+  color: var(--text-faint);
+}
+
+.field select,
+.field input[type="number"] {
+  min-height: var(--tap);
+  min-width: 5.5rem;
+  padding: 0.35rem 0.5rem;
+  background: var(--surface-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  /* 16px stops iOS Safari zooming the page when the field is focused */
+  font-size: 1rem;
+}
+
+/* Accessible toggle built from a checkbox */
+.toggle {
+  position: relative;
+  flex: 0 0 auto;
+  width: 3rem;
+  height: 1.75rem;
+}
+
+.toggle input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  margin: 0;
+}
+
+.toggle__track {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--border);
+  border-radius: 999px;
+  transition: background 0.18s ease;
+  pointer-events: none;
+}
+
+.toggle__track::after {
+  content: "";
+  position: absolute;
+  top: 0.1875rem;
+  left: 0.1875rem;
+  width: 1.375rem;
+  height: 1.375rem;
+  background: var(--text);
+  border-radius: 50%;
+  transition: transform 0.18s ease;
+}
+
+.toggle input:checked + .toggle__track { background: var(--win); }
+.toggle input:checked + .toggle__track::after { transform: translateX(1.25rem); }
+.toggle input:focus-visible + .toggle__track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- stats ---------- */
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.stat {
+  padding: 0.6rem;
+  background: var(--surface-raised);
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.stat__value { font-size: 1.25rem; font-weight: 700; }
+.stat__label {
+  margin-top: 0.15rem;
+  font-size: 0.625rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.stat__value--good { color: var(--win); }
+.stat__value--bad { color: var(--lose); }
+
+.mistakes { display: flex; flex-direction: column; gap: 0.35rem; }
+
+.mistake {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  background: var(--surface-raised);
+  border-left: 3px solid var(--lose);
+  border-radius: 0.35rem;
+  font-size: 0.75rem;
+}
+
+.mistake__fix { color: var(--win); font-weight: 650; }
+
+.empty {
+  padding: 1.5rem 0;
+  text-align: center;
+  font-size: 0.8125rem;
+  color: var(--text-faint);
+}
+
+/* ---------- landscape / short screens ---------- */
+
+@media (max-height: 34rem) and (orientation: landscape) {
+  :root {
+    --card-w: clamp(2.5rem, 9vw, 4rem);
+    --pad: 0.5rem;
+  }
+
+  .shoe { display: none; }
+  .felt { flex-direction: row; align-items: center; justify-content: space-around; }
+}
+
+/* Respect users who don't want motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

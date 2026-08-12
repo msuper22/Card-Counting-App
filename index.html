@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <!-- viewport-fit=cover lets the layout run under the notch; the CSS pads it back with safe-area insets -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0f1b14">
+  <meta name="description" content="Blackjack card counting trainer with Hi-Lo, KO and Omega II, basic strategy and the Illustrious 18 deviations.">
+
+  <!-- Behave like an app when added to the home screen -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Counter">
+
+  <title>Card Counting Trainer</title>
+
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icons/icon-180.png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <div class="boot">
+      <div class="boot__spinner" aria-hidden="true"></div>
+      <p class="boot__text">Shuffling…</p>
+    </div>
+  </div>
+
+  <noscript>
+    <p style="padding:2rem;text-align:center;color:#fff">
+      This trainer needs JavaScript enabled.
+    </p>
+  </noscript>
+
+  <script src="./dist/bundle.js"></script>
+</body>
+</html>
