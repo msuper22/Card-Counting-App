@@ -14,7 +14,7 @@ import { JSDOM } from 'jsdom';
  * Stand up a DOM, mount the app, and hand back helpers for driving it.
  * The app module is imported fresh each time so module state can't leak.
  */
-async function mountApp() {
+async function mountApp(settings = null) {
   const dom = new JSDOM('<!DOCTYPE html><div id="app"></div>', {
     url: 'https://example.test/',
     pretendToBeVisual: true
@@ -34,6 +34,11 @@ async function mountApp() {
   });
 
   dom.window.localStorage.clear();
+
+  // Seed settings before mounting so the app boots into the mode under test
+  if (settings) {
+    dom.window.localStorage.setItem('ccapp:v1', JSON.stringify({ settings }));
+  }
 
   // Cache-bust so each test gets a clean module instance
   const { default: App } = await import(`../src/ui/App.js?t=${Math.random()}`);
@@ -230,4 +235,228 @@ test('an empty bankroll offers a rebuy instead of locking up', async () => {
   if (app.game.players[0].bankroll < 5) {
     assert.ok(button('rebuy'), 'no rebuy offered when out of chips');
   }
+});
+
+/* ===================== difficulty modes ===================== */
+
+import { applyDifficulty } from '../src/difficulty.js';
+import { DEFAULT_SETTINGS } from '../src/storage.js';
+
+const modeSettings = mode => applyDifficulty(DEFAULT_SETTINGS, mode);
+
+/** Force a specific player hand against a specific dealer upcard */
+function stageHand(app, playerRanks, dealerRanks) {
+  const player = app.game.players[0];
+  const Card = player.hands[0].cards[0].constructor;
+
+  player.hands[0].cards = playerRanks.map(rank => new Card(1, 'spades', rank));
+  app.game.dealer.hands[0].cards = dealerRanks.map(rank => new Card(2, 'hearts', rank));
+  app.game.dealer.hands[0].cards[1].setFaceUp(false);
+  app.game.dealer.holeCardRevealed = false;
+  app.game.gamePhase = 'playerTurn';
+  app.game.currentPlayerIndex = 0;
+  app.game.currentHandIndex = 0;
+  app.render();
+}
+
+test('easy mode names the correct play before you act', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+  button('deal').click();
+
+  if (app.game.gamePhase !== 'playerTurn') return;
+
+  assert.ok($('.advice__play'), 'easy mode did not show a recommended play');
+  app._stopTimer();
+});
+
+test('normal mode shows the count but never the play', async () => {
+  const { app, $, button } = await mountApp(modeSettings('normal'));
+  button('deal').click();
+
+  if (app.game.gamePhase !== 'playerTurn') return;
+
+  assert.equal($('.advice__play'), null, 'normal mode pre-announced the play');
+  assert.equal($('.count').classList.contains('is-hidden'), false, 'normal mode hid the count');
+  assert.notEqual($('.count__value').textContent, '?', 'normal mode should show real numbers');
+  app._stopTimer();
+});
+
+test('normal mode explains a misplay after the hand', async () => {
+  const { app, $, $$, button } = await mountApp(modeSettings('normal'));
+  button('deal').click();
+
+  // Hitting a hard 20 against a 6 is unambiguously wrong
+  stageHand(app, ['king', 'queen'], ['6', '10']);
+
+  const hit = $$('button').find(b => b.textContent.trim() === 'Hit' && !b.disabled);
+  assert.ok(hit, 'no hit button available');
+  hit.click();
+
+  assert.ok(
+    app.trainer.getRoundMistakes().length >= 1,
+    'the misplay was not recorded for review'
+  );
+
+  // Finish the hand, then let the deferred review fire
+  let guard = 0;
+  while (app.game.gamePhase === 'playerTurn' && guard++ < 20) {
+    const stand = [...$('.controls').querySelectorAll('button')]
+      .find(b => b.textContent.trim() === 'Stand' && !b.disabled);
+    if (!stand) break;
+    stand.click();
+  }
+
+  await new Promise(resolve => setTimeout(resolve, 1100));
+
+  assert.equal($('.sheet').hidden, false, 'no post-hand review appeared');
+  assert.ok($('.review__item'), 'review sheet had no content');
+  assert.ok($('.review__why').textContent.length > 10, 'review gave no explanation');
+
+  clearTimeout(app.reviewTimer);
+  app._stopTimer();
+});
+
+test('hard mode hides the count and refuses to reveal it', async () => {
+  const { app, $ } = await mountApp(modeSettings('hard'));
+
+  assert.equal($('.count__value').textContent, '?', 'hard mode leaked the count');
+
+  // The real value must not be reachable by tapping
+  $('.count').click();
+  assert.equal($('.count__value').textContent, '?', 'hard mode allowed a peek');
+
+  app._stopTimer();
+});
+
+test('hard mode hides hand totals', async () => {
+  const { app, $, button } = await mountApp(modeSettings('hard'));
+  button('deal').click();
+
+  const totals = [...$('.felt').querySelectorAll('.seat__total')];
+  totals.forEach(node => {
+    assert.equal(node.textContent.trim(), '', 'hard mode showed a hand total');
+  });
+
+  app._stopTimer();
+});
+
+test('hard mode runs a decision timer', async () => {
+  const { app, $, button } = await mountApp(modeSettings('hard'));
+  button('deal').click();
+
+  if (app.game.gamePhase !== 'playerTurn') { app._stopTimer(); return; }
+
+  assert.ok(app.timerDeadline, 'no decision deadline was set');
+  assert.ok($('.timer__fill'), 'timer bar was not rendered');
+
+  app._stopTimer();
+  assert.equal(app.timerDeadline, null);
+});
+
+test('hard mode grades the bet', async () => {
+  const { app, button } = await mountApp(modeSettings('hard'));
+
+  app.pendingBet = 500;   // a wild overbet off the top of a neutral shoe
+  app.render();
+  button('deal').click();
+
+  const stats = app.trainer.getStats();
+  assert.equal(stats.betsGraded, 1, 'the wager was not graded');
+  assert.equal(stats.betsCorrect, 0, 'a 100x overbet was accepted as correct');
+  assert.ok(
+    app.trainer.getRoundMistakes().some(m => m.kind === 'bet'),
+    'bet mistake was not recorded'
+  );
+
+  app._stopTimer();
+});
+
+test('hard mode asks for the count before the shoe is reshuffled', async () => {
+  const { app, $ } = await mountApp(modeSettings('hard'));
+
+  // Push the shoe past the cut card so an audit is owed
+  app.game.deck.cards.length = 10;
+  app.game.gamePhase = 'payout';
+
+  assert.equal(app._auditDue(), true, 'no count check owed at the cut card');
+
+  app._nextHand();
+  assert.equal($('.sheet').hidden, false, 'count check did not appear');
+  assert.ok($('.audit__input'), 'count check had no input');
+
+  // The prompt must not be dismissable by tapping the backdrop
+  $('.sheet').click();
+  assert.equal($('.sheet').hidden, false, 'count check was dismissed by a backdrop tap');
+
+  // Answering grades and moves on
+  $('.audit__input').value = '3';
+  [...$('.sheet').querySelectorAll('button')].find(b => /check/i.test(b.textContent)).click();
+  assert.equal(app.trainer.getStats().auditsTaken, 1, 'the answer was not graded');
+
+  app._stopTimer();
+});
+
+test('the game log captures a played hand', async () => {
+  const { app, $, button } = await mountApp(modeSettings('normal'));
+
+  button('deal').click();
+  let guard = 0;
+  while (app.game.gamePhase === 'playerTurn' && guard++ < 20) {
+    const stand = [...$('.controls').querySelectorAll('button')]
+      .find(b => b.textContent.trim() === 'Stand' && !b.disabled);
+    if (!stand) break;
+    stand.click();
+  }
+
+  const text = app.log.toText(true);
+  assert.match(text, /bet /, 'bet was not logged');
+  assert.match(text, /dealt /, 'deal was not logged');
+  assert.match(text, /settled /, 'settlement was not logged');
+
+  clearTimeout(app.reviewTimer);
+  app._stopTimer();
+});
+
+test('switching difficulty from the menu takes effect', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  const hard = [...$('.sheet').querySelectorAll('button')]
+    .find(b => b.textContent.trim() === 'Hard');
+  assert.ok(hard, 'no hard button in the menu');
+  hard.click();
+
+  assert.equal(app.settings.difficulty, 'hard');
+  assert.equal(app.settings.showHandTotals, false);
+  assert.equal(app.settings.allowCountPeek, false);
+
+  app._stopTimer();
+});
+
+test('the count drill can be entered and exited cleanly', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  button('count drill').click();
+  assert.ok($('.field__label'), 'drill setup did not render');
+
+  button('start drill').click();
+  assert.ok(app.drill, 'drill was not created');
+  assert.ok($('.drill__card'), 'drill view did not render');
+
+  // Deal a few cards by hand, then leave
+  app.drill.running = false;
+  app.drill._dealNext();
+  app.drill._dealNext();
+  assert.equal(app.drill.dealt, 2);
+
+  app.drill.destroy(true);
+
+  // Exiting must rebuild the table, not leave the drill on screen
+  assert.equal(app.drill, null, 'drill reference was not cleared');
+  assert.equal($('.drill__card'), null, 'drill view was left on screen');
+  assert.ok($('.felt'), 'table was not restored');
+  assert.ok($('.status'), 'status bar was not restored');
+
+  app._stopTimer();
 });

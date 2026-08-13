@@ -12,8 +12,11 @@
 
 import Game from '../Game.js';
 import Trainer from '../Trainer.js';
+import GameLog from '../GameLog.js';
 import { el, replace, money, signed, buzz } from './dom.js';
 import { renderCard } from './CardView.js';
+import CountDrill from './CountDrill.js';
+import { DIFFICULTIES, applyDifficulty, detectDifficulty } from '../difficulty.js';
 import {
   loadSettings, saveSettings, loadSession, saveSession, clearSession, DEFAULT_SETTINGS
 } from '../storage.js';
@@ -41,6 +44,7 @@ class App {
   constructor(container) {
     this.container = container;
     this.settings = loadSettings();
+    this.log = new GameLog();
 
     // Cards already shown, so re-renders don't replay the deal animation
     this.seenCards = new Set();
@@ -49,8 +53,28 @@ class App {
     this.lastAdvice = null;
     this.lastGrade = null;
 
+    // Hard-mode count audits: how many hands since the last one
+    this.handsSinceAudit = 0;
+    this.nextAuditAt = this._scheduleAudit();
+    this.pendingAudit = false;
+
+    this.log.append('appStarted', {
+      difficulty: this.settings.difficulty,
+      decks: this.settings.numberOfDecks,
+      system: this.settings.countingSystem
+    });
+
     this._buildFrame();
     this._startSession();
+  }
+
+  /**
+   * Pick how many hands until the next count check. Randomised so you can't
+   * simply start counting again two hands beforehand.
+   * @private
+   */
+  _scheduleAudit() {
+    return 8 + Math.floor(Math.random() * 10);
   }
 
   /* ===================== setup ===================== */
@@ -135,8 +159,11 @@ class App {
     this.nodes.sheet = el('div.sheet', { hidden: true });
 
     this.nodes.sheet.addEventListener('click', event => {
-      // Tapping the dimmed backdrop closes the sheet
-      if (event.target === this.nodes.sheet) this._closeSheet();
+      // Tapping the dimmed backdrop closes the sheet, unless it's a prompt
+      // that has to be answered (a count check).
+      if (event.target === this.nodes.sheet && this.sheetDismissible !== false) {
+        this._closeSheet();
+      }
     });
 
     replace(this.container, [
@@ -212,13 +239,73 @@ class App {
     ].forEach(event => this.game.addEventListener(event, rerender));
 
     this.game.addEventListener('payoutPhaseStarted', data => {
+      this._logRoundEnd(data.results);
       this._showResults(data.results);
       this.render();
       this._persist();
+
+      // Normal mode explains misplays once the hand is over
+      if (this.settings.postHandReview) {
+        const mistakes = this.trainer.getRoundMistakes();
+        if (mistakes.length) {
+          // Let the result banner land before interrupting
+          this.reviewTimer = setTimeout(() => this._openReview(mistakes), 900);
+        }
+      }
     });
 
     this.game.addEventListener('dealerBlackjack', () => {
       this._banner('lose', 'Dealer blackjack');
+    });
+
+    // Diagnostics: record the shape of every hand as it happens
+    this.game.addEventListener('initialCardsDealt', data => {
+      const state = data.state;
+      this.log.append('dealt', {
+        round: state.roundNumber,
+        player: GameLog.describeHand(state.players[0].hands[0]),
+        dealerUp: state.dealer.upCard ? `${state.dealer.upCard.rank}${state.dealer.upCard.suit[0]}` : null,
+        rc: this.trainer.getCount().running,
+        tc: this.trainer.getCount().true,
+        decksLeft: Math.round(state.decksRemaining * 100) / 100
+      });
+    });
+
+    this.game.addEventListener('deckReshuffled', () => {
+      this.log.append('shuffled', { round: this.game.roundNumber });
+    });
+
+    this.game.addEventListener('insuranceOffered', () => {
+      this.log.append('insuranceOffered', {
+        round: this.game.roundNumber,
+        tc: this.trainer.getCount().true,
+        advised: this.trainer.shouldTakeInsurance()
+      });
+    });
+  }
+
+  /**
+   * Write the settled hand to the diagnostic log.
+   * @private
+   */
+  _logRoundEnd(results) {
+    if (!results || !results.length) return;
+
+    const state = this.game.getGameState();
+
+    this.log.append('settled', {
+      round: state.roundNumber,
+      dealer: `${state.dealer.hand.map(c => `${c.rank}${c.suit[0]}`).join(' ')} (${state.dealer.fullValue})`,
+      hands: results[0].hands
+        .filter(hand => hand.bet > 0)
+        .map(hand => ({
+          bet: hand.bet,
+          value: hand.value,
+          result: hand.result,
+          net: hand.net
+        })),
+      bankroll: results[0].bankroll,
+      mistakes: this.trainer.getRoundMistakes().length
     });
   }
 
@@ -243,6 +330,17 @@ class App {
   /** @private */
   _renderCount(state) {
     const count = this.trainer.getCount();
+
+    // With peeking disabled the numbers never reach the DOM at all, so they
+    // can't be recovered by inspecting the page.
+    if (!this.settings.allowCountPeek) {
+      this.nodes.runningCount.textContent = '?';
+      this.nodes.trueCount.textContent = '?';
+      this.nodes.runningCount.className = 'count__value count__value--zero';
+      this.nodes.trueCount.className = 'count__value count__value--zero';
+      this.nodes.count.classList.remove('is-hidden');
+      return;
+    }
 
     const paint = (node, value) => {
       node.textContent = signed(value);
@@ -288,6 +386,13 @@ class App {
       cards.map((card, index) => this._card(card, index))
     )));
 
+    if (!this.settings.showHandTotals) {
+      // Hard mode: read the cards, do your own arithmetic
+      this.nodes.dealerTotal.textContent = '';
+      this.nodes.dealerTotal.className = 'seat__total is-blank';
+      return;
+    }
+
     // While the hole card is down, only show what's actually visible
     const showFull = state.dealer.holeCardRevealed;
     const value = showFull ? state.dealer.fullValue : state.dealer.value;
@@ -321,12 +426,20 @@ class App {
         el('div.hand__cards', {}, hand.cards.map((card, i) => this._card(card, i))),
         el('div.hand__bet', {}, [
           el('span', { text: hand.bet > 0 ? money(hand.bet) : '' }),
-          player.hands.length > 1 ? el('span.seat__total', { text: total }) : null
+          player.hands.length > 1 && this.settings.showHandTotals
+            ? el('span.seat__total', { text: total })
+            : null
         ])
       ]);
     });
 
     replace(this.nodes.playerHands, handNodes);
+
+    if (!this.settings.showHandTotals) {
+      this.nodes.playerTotal.textContent = '';
+      this.nodes.playerTotal.className = 'seat__total is-blank';
+      return;
+    }
 
     // The headline total only makes sense for a single hand
     if (player.hands.length === 1) {
@@ -367,8 +480,15 @@ class App {
 
   /** @private */
   _renderAdvice(state) {
-    // Feedback on the last decision outranks advice for the next one
-    if (this.lastGrade) {
+    // A decision timer, when running, owns this line
+    if (this.timerDeadline && state.gamePhase === 'playerTurn') {
+      this._renderTimer();
+      return;
+    }
+
+    // Instant feedback belongs to easy mode only. Normal defers it to the
+    // post-hand review, hard defers it to the end of the session.
+    if (this.lastGrade && this.settings.showAdvice) {
       const { correct, expected, played, wasDeviation } = this.lastGrade;
       replace(this.nodes.advice, correct
         ? el('span.advice--correct', { text: `✓ ${ACTION_LABELS[played] || played} was right` })
@@ -571,10 +691,27 @@ class App {
    * @private
    */
   _toggleCount() {
+    // Hard mode gives no peeking - that's the whole point of it
+    if (!this.settings.allowCountPeek) {
+      this._flashAdvice('Count is hidden in hard mode');
+      return;
+    }
+
     this.settings.showCount = !this.settings.showCount;
+    this.settings.difficulty = detectDifficulty(this.settings);
     saveSettings(this.settings);
     if (this.settings.haptics) buzz();
     this.render();
+  }
+
+  /**
+   * Briefly show a message in the advice line.
+   * @private
+   */
+  _flashAdvice(message) {
+    replace(this.nodes.advice, el('span', { text: message, style: 'color:var(--text-dim)' }));
+    clearTimeout(this.flashTimer);
+    this.flashTimer = setTimeout(() => this.render(), 1600);
   }
 
   /** @private */
@@ -591,30 +728,152 @@ class App {
     this.lastGrade = null;
     this.pendingBet = bet;
     if (this.settings.haptics) buzz();
+
+    const bankroll = this.game.players[0].bankroll;
+    const count = this.trainer.getCount();
+
+    // Hard mode grades the wager too - the ramp is where counting pays
+    let betGrade = null;
+    if (this.settings.gradeBets) {
+      betGrade = this.trainer.recordBet(bet, bankroll);
+    }
+
+    this.log.append('bet', {
+      round: this.game.roundNumber,
+      amount: bet,
+      bankroll,
+      rc: count.running,
+      tc: count.true,
+      graded: betGrade ? betGrade.correct : null,
+      suggested: betGrade ? betGrade.expected : null
+    });
+
     this.game.placeBet(0, bet);
+    this._startTimer();
     this._persist();
   }
 
   /** @private */
-  _act(action) {
+  _act(action, viaTimeout = false) {
+    // Confirm the move is legal before recording anything against it
+    const actions = this.game.getAvailableActions();
+    const permitted = {
+      hit: actions.canHit,
+      stand: actions.canStand,
+      double: actions.canDouble,
+      split: actions.canSplit,
+      surrender: actions.canSurrender
+    };
+
+    if (!permitted[action]) {
+      return;
+    }
+
     // Capture the advice for this decision *before* the action changes the hand
     const advice = this.settings.gradeDecisions ? this.trainer.getAdvice() : null;
     if (this.settings.haptics) buzz();
 
-    const ok = this.game.playerAction(action);
-    if (!ok) return;
+    this._stopTimer();
 
+    const before = this.game.getGameState();
+    const handBefore = before.players[0].hands[before.currentHandIndex];
+
+    // Grade before acting. A bust or a final stand settles the whole round
+    // synchronously inside playerAction, and the post-hand review reads the
+    // round's mistakes at that moment - grading afterwards would arrive too
+    // late and the review would come up empty.
     this.lastGrade = advice ? this.trainer.recordDecision(action, advice) : null;
+
+    const ok = this.game.playerAction(action);
+    if (!ok) {
+      this._startTimer();
+      return;
+    }
+
+    this.log.append('decision', {
+      round: before.roundNumber,
+      hand: handBefore ? GameLog.describeHand(handBefore) : null,
+      dealerUp: before.dealer.upCard ? before.dealer.upCard.rank : null,
+      played: action,
+      timedOut: viaTimeout || undefined,
+      correct: this.lastGrade ? this.lastGrade.correct : null,
+      expected: this.lastGrade && !this.lastGrade.correct ? this.lastGrade.expected : undefined,
+      deviation: advice && advice.isDeviation ? true : undefined,
+      tc: advice ? advice.trueCount : this.trainer.getCount().true
+    });
+
     this.render();
 
+    // Still the player's turn? Restart the clock for the next decision.
+    if (this.game.gamePhase === 'playerTurn') {
+      this._startTimer();
+    }
+
     // Feedback is transient; clear it so the next decision gets fresh advice
-    if (this.lastGrade) {
+    if (this.lastGrade && this.settings.showAdvice) {
       clearTimeout(this.gradeTimer);
       this.gradeTimer = setTimeout(() => {
         this.lastGrade = null;
         this.render();
       }, this.lastGrade.correct ? 1200 : 2600);
     }
+  }
+
+  /* ===================== decision timer ===================== */
+
+  /**
+   * Start the per-decision countdown, if the mode uses one.
+   * @private
+   */
+  _startTimer() {
+    this._stopTimer();
+
+    const seconds = Number(this.settings.decisionSeconds) || 0;
+    if (seconds <= 0 || this.game.gamePhase !== 'playerTurn') {
+      return;
+    }
+
+    this.timerDeadline = Date.now() + seconds * 1000;
+
+    // Paint the bar straight away rather than waiting for the first tick
+    this._renderTimer();
+
+    this.timerTick = setInterval(() => {
+      if (!this.timerDeadline) return;
+
+      if (Date.now() >= this.timerDeadline) {
+        this._stopTimer();
+        this.log.append('decisionTimeout', { round: this.game.roundNumber });
+        // Out of time plays as a stand, and counts against you
+        this._act('stand', true);
+        return;
+      }
+
+      this._renderTimer();
+    }, 100);
+  }
+
+  /** @private */
+  _stopTimer() {
+    clearInterval(this.timerTick);
+    this.timerTick = null;
+    this.timerDeadline = null;
+  }
+
+  /** @private */
+  _renderTimer() {
+    if (!this.timerDeadline) return;
+
+    const total = (Number(this.settings.decisionSeconds) || 1) * 1000;
+    const left = Math.max(0, this.timerDeadline - Date.now());
+    const pct = (left / total) * 100;
+
+    replace(this.nodes.advice, el('div.timer', {}, [
+      el('span.timer__label', { text: `${Math.ceil(left / 1000)}s` }),
+      el('div.timer__track', {}, el('div.timer__fill', {
+        style: `width:${pct}%${pct < 30 ? ';background:var(--lose)' : ''}`
+      }))
+    ]));
   }
 
   /** @private */
@@ -632,8 +891,191 @@ class App {
   /** @private */
   _nextHand() {
     this._clearBanner();
+    clearTimeout(this.reviewTimer);
     this.lastGrade = null;
+
+    // Check the count *before* starting the next round, because starting it
+    // may trigger a reshuffle that resets the number we're asking about.
+    if (this._auditDue()) {
+      this._openAudit();
+      return;
+    }
+
+    this.handsSinceAudit++;
     this.game.startNewRound();
+  }
+
+  /**
+   * Whether a count check is owed. Fires on the randomised interval, and
+   * always just before the shoe is about to be reshuffled - counting a shoe
+   * all the way to the cut card is the thing worth testing.
+   * @private
+   */
+  _auditDue() {
+    if (!this.settings.countAudits || this.pendingAudit) {
+      return false;
+    }
+
+    const cutCard = this.settings.numberOfDecks * 52 * this.settings.reshuffleThreshold;
+    const aboutToShuffle = this.game.deck.getCount() < cutCard;
+
+    return aboutToShuffle || this.handsSinceAudit >= this.nextAuditAt;
+  }
+
+  /**
+   * Ask the player what the running count is, and grade the answer.
+   * @private
+   */
+  _openAudit() {
+    this.pendingAudit = true;
+
+    const input = el('input.audit__input', {
+      type: 'number',
+      inputmode: 'numeric',
+      // Never autofocus: on a phone that yanks the keyboard up over the table
+      placeholder: '0',
+      'aria-label': 'Running count'
+    });
+
+    const submit = () => {
+      const entered = Number.parseInt(input.value, 10);
+      if (Number.isNaN(entered)) {
+        input.focus();
+        return;
+      }
+      this._gradeAudit(entered);
+    };
+
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') submit();
+    });
+
+    this._openSheet('Count check', el('div.audit', {}, [
+      el('p.audit__prompt', {
+        text: 'What is the running count right now?'
+      }),
+      el('p.field__hint', {
+        text: `${this.game.deck.getCount()} cards left in the shoe.`,
+        style: 'margin-bottom:0.75rem'
+      }),
+      input,
+      el('div.actions', { style: 'margin-top:0.75rem' }, [
+        el('button.btn', {
+          type: 'button',
+          text: 'Skip',
+          onclick: () => this._finishAudit()
+        }),
+        el('button.btn.btn--primary', {
+          type: 'button',
+          text: 'Check',
+          onclick: submit
+        })
+      ])
+    ]), { dismissible: false });
+  }
+
+  /** @private */
+  _gradeAudit(entered) {
+    const result = this.trainer.recordCountAudit(entered);
+
+    this.log.append('countAudit', {
+      round: this.game.roundNumber,
+      entered: result.entered,
+      actual: result.actual,
+      off: result.off,
+      correct: result.correct,
+      decksLeft: Math.round((this.game.deck.getCount() / 52) * 100) / 100
+    });
+
+    if (this.settings.haptics) buzz(result.correct ? [10, 40, 10] : 20);
+
+    const stats = this.trainer.getStats();
+
+    this._openSheet(result.correct ? 'Correct' : 'Off by ' + Math.abs(result.off),
+      el('div.audit', {}, [
+        el('div.stats-grid', {}, [
+          el('div.stat', {}, [
+            el('div.stat__value' + (result.correct ? '.stat__value--good' : '.stat__value--bad'), {
+              text: signed(result.entered)
+            }),
+            el('div.stat__label', { text: 'You said' })
+          ]),
+          el('div.stat', {}, [
+            el('div.stat__value', { text: signed(result.actual) }),
+            el('div.stat__label', { text: 'Actual' })
+          ]),
+          el('div.stat', {}, [
+            el('div.stat__value', { text: `${stats.auditAccuracy}%` }),
+            el('div.stat__label', { text: 'Checks right' })
+          ])
+        ]),
+        result.correct
+          ? el('p.field__hint', { text: 'Count is on. Keep going.' })
+          : el('p.field__hint', {
+              text: result.off > 0
+                ? 'You counted high — likely missed some tens or aces.'
+                : 'You counted low — likely missed some low cards.'
+            }),
+        el('div.actions', { style: 'margin-top:1rem' }, [
+          el('button.btn.btn--primary.btn--wide', {
+            type: 'button',
+            text: 'Continue',
+            onclick: () => this._finishAudit()
+          })
+        ])
+      ]), { dismissible: false });
+  }
+
+  /** @private */
+  _finishAudit() {
+    this.pendingAudit = false;
+    this.handsSinceAudit = 0;
+    this.nextAuditAt = this._scheduleAudit();
+    this._closeSheet();
+    this.game.startNewRound();
+  }
+
+  /**
+   * Explain every misplay from the hand just finished (normal mode).
+   * @private
+   */
+  _openReview(mistakes) {
+    const rows = mistakes.map(mistake => el('div.review__item', {}, [
+      el('div.review__head', {}, [
+        el('span.review__played', {
+          text: mistake.kind === 'bet'
+            ? `You bet ${money(mistake.played)}`
+            : `You played ${ACTION_LABELS[mistake.played] || mistake.played}`
+        }),
+        el('span.review__arrow', { text: '→' }),
+        el('span.review__fix', {
+          text: mistake.kind === 'bet'
+            ? money(mistake.expected)
+            : ACTION_LABELS[mistake.expected] || mistake.expected
+        }),
+        mistake.wasDeviation ? el('span.advice__tag', { text: 'deviation' }) : null
+      ]),
+      mistake.kind === 'play' && mistake.hand !== undefined
+        ? el('div.review__hand', {
+            text: `${mistake.hand} vs dealer ${mistake.dealerUpCard} · true count ${signed(mistake.trueCount || 0)}`
+          })
+        : null,
+      el('p.review__why', { text: mistake.explanation })
+    ]));
+
+    this._openSheet(
+      mistakes.length === 1 ? 'One to look at' : `${mistakes.length} to look at`,
+      el('div', {}, [
+        el('div.review', {}, rows),
+        el('div.actions', { style: 'margin-top:1rem' }, [
+          el('button.btn.btn--primary.btn--wide', {
+            type: 'button',
+            text: 'Got it',
+            onclick: () => this._closeSheet()
+          })
+        ])
+      ])
+    );
   }
 
   /** @private */
@@ -717,17 +1159,28 @@ class App {
 
   /* ===================== sheets ===================== */
 
-  /** @private */
-  _openSheet(title, body) {
+  /**
+   * Show a bottom sheet.
+   * @param {string} title
+   * @param {Node} body
+   * @param {Object} [options] - `dismissible: false` for prompts that must be answered
+   * @private
+   */
+  _openSheet(title, body, options = {}) {
+    const dismissible = options.dismissible !== false;
+    this.sheetDismissible = dismissible;
+
     replace(this.nodes.sheet, el('div.sheet__panel', {}, [
       el('div.sheet__header', {}, [
         el('h2.sheet__title', { text: title }),
-        el('button.sheet__close', {
-          type: 'button',
-          text: '✕',
-          'aria-label': 'Close',
-          onclick: () => this._closeSheet()
-        })
+        dismissible
+          ? el('button.sheet__close', {
+              type: 'button',
+              text: '✕',
+              'aria-label': 'Close',
+              onclick: () => this._closeSheet()
+            })
+          : null
       ]),
       body
     ]));
@@ -744,8 +1197,28 @@ class App {
 
   /** @private */
   _openMenu() {
+    const current = DIFFICULTIES[this.settings.difficulty] || DIFFICULTIES.custom;
+
     this._openSheet('Menu', el('div', {}, [
+      el('div.field', {}, [
+        el('div', {}, [
+          el('div.field__label', { text: 'Difficulty' }),
+          el('span.field__hint', { text: current.blurb })
+        ])
+      ]),
+      el('div.actions', { style: 'margin-bottom:1rem' },
+        ['easy', 'normal', 'hard'].map(key => el('button.btn', {
+          type: 'button',
+          text: DIFFICULTIES[key].label,
+          class: this.settings.difficulty === key ? 'btn--primary' : null,
+          onclick: () => this._setDifficulty(key)
+        }))
+      ),
+
       el('div.actions', { style: 'margin-bottom:0.75rem' }, [
+        el('button.btn.btn--primary.btn--wide', {
+          type: 'button', text: 'Count drill', onclick: () => this._openDrillSetup()
+        }),
         el('button.btn.btn--wide', {
           type: 'button', text: 'Session stats', onclick: () => this._openStats()
         }),
@@ -754,8 +1227,149 @@ class App {
         }),
         el('button.btn.btn--wide', {
           type: 'button', text: 'How counting works', onclick: () => this._openHelp()
+        }),
+        el('button.btn.btn--wide', {
+          type: 'button', text: `Game log (${this.log.size()})`, onclick: () => this._openLog()
         })
       ])
+    ]));
+  }
+
+  /** @private */
+  _setDifficulty(key) {
+    this.settings = applyDifficulty(this.settings, key);
+    saveSettings(this.settings);
+    this.log.append('difficultyChanged', { difficulty: key });
+
+    // Timer settings only take effect from the next decision
+    this._stopTimer();
+    this._closeSheet();
+    this._flashAdvice(`${DIFFICULTIES[key].label} mode`);
+  }
+
+  /* ===================== count drill ===================== */
+
+  /** @private */
+  _openDrillSetup() {
+    this._openSheet('Count drill', el('div', {}, [
+      el('p.field__hint', {
+        text: 'Deals a shoe one card at a time and stops at random to ask for the running count. ' +
+              'Speed is adjustable mid-drill.',
+        style: 'margin-bottom:0.75rem;line-height:1.45'
+      }),
+      el('div.field', {}, [
+        el('div.field__label', { text: 'Shoe size' }),
+        el('select', {
+          onchange: event => { this.drillDecks = Number(event.target.value); }
+        }, [1, 2, 4, 6, 8].map(decks => el('option', {
+          value: String(decks),
+          text: `${decks} deck${decks > 1 ? 's' : ''}`,
+          selected: decks === (this.drillDecks || this.settings.numberOfDecks)
+        })))
+      ]),
+      el('div.field', {}, [
+        el('div.field__label', { text: 'Count checks' }),
+        el('select', {
+          onchange: event => { this.drillChecks = Number(event.target.value); }
+        }, [2, 4, 6, 10].map(n => el('option', {
+          value: String(n),
+          text: `${n} per shoe`,
+          selected: n === (this.drillChecks || 4)
+        })))
+      ]),
+      el('div.actions', { style: 'margin-top:1rem' }, [
+        el('button.btn.btn--primary.btn--wide', {
+          type: 'button',
+          text: 'Start drill',
+          onclick: () => this._startDrill()
+        })
+      ])
+    ]));
+  }
+
+  /** @private */
+  _startDrill() {
+    this._closeSheet();
+    this._stopTimer();
+
+    const decks = this.drillDecks || this.settings.numberOfDecks;
+    const checks = this.drillChecks || 4;
+
+    this.log.append('drillStarted', {
+      decks,
+      checks,
+      system: this.settings.countingSystem,
+      speed: this.settings.drillSpeed || 'steady'
+    });
+
+    this.drill = new CountDrill(this.container, {
+      decks,
+      checksPerShoe: checks,
+      countingSystem: this.settings.countingSystem,
+      speed: this.settings.drillSpeed || 'steady',
+      haptics: this.settings.haptics,
+      log: this.log,
+      onExit: () => this._exitDrill()
+    });
+  }
+
+  /** @private */
+  _exitDrill() {
+    // Remember the speed that was last used
+    if (this.drill) {
+      this.settings.drillSpeed = this.drill.options.speed;
+      saveSettings(this.settings);
+      this.drill.destroy();
+      this.drill = null;
+    }
+
+    // Rebuild the table; the drill replaced the container's contents
+    this._buildFrame();
+    this.render();
+  }
+
+  /* ===================== diagnostics ===================== */
+
+  /** @private */
+  _openLog() {
+    const text = this.log.toText(true);
+    const lines = text ? text.split('\n').slice(-80).reverse() : [];
+
+    const copy = async () => {
+      const payload = this.log.toJSON(false);
+      try {
+        await navigator.clipboard.writeText(payload);
+        this._flashAdvice('Log copied');
+        this._closeSheet();
+      } catch {
+        // Clipboard needs a secure context and permission; fall back to a
+        // selectable textarea the user can copy from by hand.
+        this._openSheet('Copy log', el('div', {}, [
+          el('p.field__hint', {
+            text: 'Select all and copy.',
+            style: 'margin-bottom:0.5rem'
+          }),
+          el('textarea.log__raw', { value: payload, readonly: true, rows: 14 })
+        ]));
+      }
+    };
+
+    this._openSheet('Game log', el('div', {}, [
+      el('p.field__hint', {
+        text: `${this.log.size()} entries stored. Copy this and send it over if something looks wrong.`,
+        style: 'margin-bottom:0.75rem'
+      }),
+      el('div.actions', { style: 'margin-bottom:0.75rem' }, [
+        el('button.btn.btn--primary', { type: 'button', text: 'Copy log', onclick: copy }),
+        el('button.btn.btn--danger', {
+          type: 'button',
+          text: 'Clear',
+          onclick: () => { this.log.clear(); this._openLog(); }
+        })
+      ]),
+      lines.length
+        ? el('div.log', {}, lines.map(line => el('div.log__line', { text: line })))
+        : el('p.empty', { text: 'Nothing logged yet.' })
     ]));
   }
 
@@ -785,6 +1399,16 @@ class App {
           'Deviations',
           stats.deviationAccuracy === null ? null : stats.deviationAccuracy >= 80 ? 'good' : 'bad'
         ),
+        stats.betsGraded > 0
+          ? stat(`${stats.betAccuracy}%`, 'Bet sizing', stats.betAccuracy >= 80 ? 'good' : 'bad')
+          : null,
+        stats.auditsTaken > 0
+          ? stat(
+              `${stats.auditsCorrect}/${stats.auditsTaken}`,
+              'Count checks',
+              stats.auditAccuracy >= 80 ? 'good' : 'bad'
+            )
+          : null,
         stat(
           `${net >= 0 ? '+' : ''}${money(net)}`,
           'Net',
@@ -792,17 +1416,25 @@ class App {
         ),
         stat(String(player.roundsWon), 'Won'),
         stat(String(player.blackjacks), 'Blackjacks')
-      ]),
+      ].filter(Boolean)),
 
       el('h3.status__label', { text: 'Recent mistakes', style: 'margin:0.75rem 0 0.35rem' }),
       mistakes.length
         ? el('div.mistakes', {}, mistakes.map(mistake => el('div.mistake', {}, [
             el('span', {
-              text: `${mistake.hand} vs ${mistake.dealerUpCard} @ TC ${signed(mistake.trueCount || 0)}`
+              text: mistake.kind === 'bet'
+                ? `Bet size @ TC ${signed(mistake.trueCount || 0)}`
+                : `${mistake.hand} vs ${mistake.dealerUpCard} @ TC ${signed(mistake.trueCount || 0)}`
             }),
             el('span', {}, [
-              el('span', { text: `${mistake.played} → ` }),
-              el('span.mistake__fix', { text: mistake.expected })
+              el('span', {
+                text: mistake.kind === 'bet'
+                  ? `${money(mistake.played)} → `
+                  : `${mistake.played} → `
+              }),
+              el('span.mistake__fix', {
+                text: mistake.kind === 'bet' ? money(mistake.expected) : mistake.expected
+              })
             ])
           ])))
         : el('p.empty', { text: 'No mistakes yet. Keep going.' }),
@@ -848,10 +1480,33 @@ class App {
       })))
     ]);
 
+    const current = DIFFICULTIES[this.settings.difficulty] || DIFFICULTIES.custom;
+
     this._openSheet('Settings', el('div', {}, [
+      el('h3.status__label', { text: 'Difficulty', style: 'margin:0.25rem 0' }),
+      el('div.actions', {}, ['easy', 'normal', 'hard'].map(key => el('button.btn', {
+        type: 'button',
+        text: DIFFICULTIES[key].label,
+        class: this.settings.difficulty === key ? 'btn--primary' : null,
+        onclick: () => {
+          this.settings = applyDifficulty(this.settings, key);
+          saveSettings(this.settings);
+          this._openSettings();
+        }
+      }))),
+      el('p.field__hint', { text: current.blurb, style: 'margin:0.4rem 0 0.75rem' }),
+
       el('h3.status__label', { text: 'Training', style: 'margin:0.25rem 0' }),
       toggle('showCount', 'Show the count', 'Turn off to practise counting yourself'),
+      toggle('allowCountPeek', 'Allow tapping to peek at the count'),
       toggle('showAdvice', 'Show recommended play'),
+      toggle('postHandReview', 'Explain misplays after each hand'),
+      toggle('showHandTotals', 'Show hand totals'),
+      toggle('countAudits', 'Ask me for the count periodically'),
+      toggle('gradeBets', 'Grade my bet sizing'),
+      select('decisionSeconds', 'Decision timer', [
+        [0, 'Off'], [20, '20 seconds'], [12, '12 seconds'], [8, '8 seconds'], [5, '5 seconds']
+      ], 'Running out of time stands the hand'),
       toggle('gradeDecisions', 'Grade my decisions'),
       toggle('showBetHint', 'Suggest bet size'),
       toggle('haptics', 'Vibration feedback'),
@@ -897,6 +1552,16 @@ class App {
     ]);
 
     this._openSheet('How counting works', el('div', {}, [
+      section('Difficulty modes', [
+        'Easy — the count is on screen and the correct play is named before you act.',
+        'Normal — the count stays on screen but you decide alone. Anything you misplay is explained once the hand is over.',
+        'Hard — no count, no hand totals, a timer on each decision and your bet size graded. You find out how you did at the end of the session.'
+      ]),
+      section('Count drill', [
+        'A pure counting exercise: it deals a shoe one card at a time and stops at random to ask for the running count.',
+        'Speed runs from Slow to Blitz and can be changed mid-drill, so you can push the pace as you get comfortable.',
+        'A complete Hi-Lo shoe always ends on zero — if your final count is not zero, you dropped one somewhere.'
+      ]),
       section('Running count', [
         'Every card you see adjusts the count. In Hi-Lo, 2–6 are +1, 7–9 are 0, and 10s through aces are −1.',
         'A high running count means the remaining shoe is rich in tens and aces, which favours you.'
@@ -926,7 +1591,15 @@ class App {
   /** @private */
   _updateSetting(key, value, needsRestart = false) {
     this.settings[key] = value;
+
+    // Hand-tuning any training flag moves you off the preset
+    this.settings.difficulty = detectDifficulty(this.settings);
     saveSettings(this.settings);
+
+    if (key === 'decisionSeconds') {
+      this._stopTimer();
+      if (this.game.gamePhase === 'playerTurn') this._startTimer();
+    }
 
     // Rule changes can't be applied mid-shoe without corrupting the count
     if (needsRestart || ['numberOfDecks', 'reshuffleThreshold', 'countingSystem', 'minBet', 'maxBet'].includes(key)) {

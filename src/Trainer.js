@@ -13,6 +13,12 @@
 
 import { CardCounting } from './CardCounting.js';
 
+/** Format a count with an explicit sign, so +2 and -2 can't be confused */
+function signedCount(value) {
+  const rounded = Math.round((value || 0) * 10) / 10;
+  return rounded > 0 ? `+${rounded}` : String(rounded);
+}
+
 class Trainer {
   /**
    * @param {Game} game - The game to observe
@@ -45,6 +51,10 @@ class Trainer {
     this.countedCards = new WeakSet();
 
     this.stats = this._emptyStats();
+
+    // Mistakes made during the hand in progress, for the post-hand review
+    this.roundMistakes = [];
+
     this.listeners = {};
 
     this._attachToGame();
@@ -57,6 +67,10 @@ class Trainer {
       deviationsSeen: 0,
       deviationsHit: 0,
       handsPlayed: 0,
+      betsGraded: 0,
+      betsCorrect: 0,
+      auditsTaken: 0,
+      auditsCorrect: 0,
       mistakes: []
     };
   }
@@ -85,6 +99,19 @@ class Trainer {
     this.game.addEventListener('roundCompleted', () => {
       this.stats.handsPlayed++;
     });
+
+    // A new betting phase means a new hand, so the review buffer starts empty
+    this.game.addEventListener('bettingPhaseStarted', () => {
+      this.roundMistakes = [];
+    });
+  }
+
+  /**
+   * Mistakes made during the hand just played.
+   * @returns {Array} Mistake records, oldest first
+   */
+  getRoundMistakes() {
+    return this.roundMistakes;
   }
 
   /**
@@ -165,6 +192,9 @@ class Trainer {
     // The engine can recommend a play the table rules don't currently permit
     advice.optimalPlay = this._legalise(advice.optimalPlay, actions);
     advice.basicStrategy = this._legalise(advice.basicStrategy, actions);
+
+    // Keep a readable form of the hand for the post-hand review
+    advice.handText = hand.cards.map(card => card.rank).join('+');
 
     return advice;
   }
@@ -253,14 +283,21 @@ class Trainer {
     if (correct) {
       this.stats.correctDecisions++;
     } else {
-      this.stats.mistakes.push({
+      const mistake = {
+        kind: 'play',
         hand: advice.hand,
+        handText: advice.handText || null,
         dealerUpCard: advice.dealerUpCard,
         played: action,
         expected,
         trueCount: advice.trueCount,
-        wasDeviation: advice.isDeviation
-      });
+        wasDeviation: advice.isDeviation,
+        explanation: this._explain(advice, action, expected)
+      };
+
+      this.stats.mistakes.push(mistake);
+      this.roundMistakes.push(mistake);
+
       // Keep the mistake log bounded
       if (this.stats.mistakes.length > 50) {
         this.stats.mistakes.shift();
@@ -288,18 +325,111 @@ class Trainer {
   }
 
   /**
+   * Explain in one sentence why the recommended play was right.
+   * @private
+   */
+  _explain(advice, played, expected) {
+    if (advice.isDeviation && advice.deviationDescription) {
+      return `At true count ${signedCount(advice.trueCount)} this is an index play: ` +
+        `${advice.deviationDescription}. Basic strategy alone would say ${advice.basicStrategy}.`;
+    }
+
+    const hand = advice.hand;
+    const up = advice.dealerUpCard;
+
+    if (expected === 'split') {
+      return `A pair against ${up} plays better as two hands than one.`;
+    }
+    if (expected === 'double') {
+      return `${hand} against ${up} is a favourable spot, so get more money in while you can.`;
+    }
+    if (expected === 'surrender') {
+      return `${hand} against ${up} loses often enough that reclaiming half the bet beats playing it out.`;
+    }
+    if (expected === 'stand' && played === 'hit') {
+      return `${hand} against ${up} busts too often — let the dealer take the risk.`;
+    }
+    if (expected === 'hit' && played === 'stand') {
+      return `${hand} against ${up} loses more by standing than the bust risk costs you.`;
+    }
+
+    return `Basic strategy for ${hand} against ${up} is ${expected}.`;
+  }
+
+  /**
+   * Grade the wager against the count-derived ramp.
+   * @param {number} amount - What the player bet
+   * @param {number} bankroll - Bankroll at the time of the bet
+   * @returns {Object} Grade, including the recommended amount
+   */
+  recordBet(amount, bankroll) {
+    const recommended = this.getBetRecommendation(bankroll);
+
+    // One betting unit of slack - the ramp is a guide, not a lookup table
+    const tolerance = Math.max(this.options.minBet, recommended.amount * 0.25);
+    const correct = Math.abs(amount - recommended.amount) <= tolerance;
+
+    this.stats.betsGraded++;
+    if (correct) {
+      this.stats.betsCorrect++;
+    } else {
+      const mistake = {
+        kind: 'bet',
+        played: amount,
+        expected: recommended.amount,
+        trueCount: recommended.trueCount,
+        wasDeviation: false,
+        explanation: amount > recommended.amount
+          ? `Overbet at true count ${signedCount(recommended.trueCount)} — the edge isn't there yet.`
+          : `Underbet at true count ${signedCount(recommended.trueCount)} — this is where the money is made.`
+      };
+
+      this.stats.mistakes.push(mistake);
+      this.roundMistakes.push(mistake);
+      if (this.stats.mistakes.length > 50) this.stats.mistakes.shift();
+    }
+
+    const result = { correct, expected: recommended.amount, played: amount, ...recommended };
+    this._emit('betGraded', result);
+    return result;
+  }
+
+  /**
+   * Grade a count audit - the player typing what they think the running count is.
+   * @param {number} entered - The player's answer
+   * @returns {Object} Whether it matched, and by how much it was off
+   */
+  recordCountAudit(entered) {
+    const actual = this.engine.getRunningCount();
+    const off = entered - actual;
+    const correct = off === 0;
+
+    this.stats.auditsTaken++;
+    if (correct) this.stats.auditsCorrect++;
+
+    const result = { correct, entered, actual, off };
+    this._emit('auditGraded', result);
+    return result;
+  }
+
+  /**
    * Accuracy figures for the session
-   * @returns {Object} Decision and deviation accuracy
+   * @returns {Object} Decision, deviation, bet and audit accuracy
    */
   getStats() {
-    const { decisions, correctDecisions, deviationsSeen, deviationsHit } = this.stats;
+    const {
+      decisions, correctDecisions, deviationsSeen, deviationsHit,
+      betsGraded, betsCorrect, auditsTaken, auditsCorrect
+    } = this.stats;
+
+    const pct = (hit, total) => (total > 0 ? Math.round((hit / total) * 100) : null);
 
     return {
       ...this.stats,
-      accuracy: decisions > 0 ? Math.round((correctDecisions / decisions) * 100) : null,
-      deviationAccuracy: deviationsSeen > 0
-        ? Math.round((deviationsHit / deviationsSeen) * 100)
-        : null
+      accuracy: pct(correctDecisions, decisions),
+      deviationAccuracy: pct(deviationsHit, deviationsSeen),
+      betAccuracy: pct(betsCorrect, betsGraded),
+      auditAccuracy: pct(auditsCorrect, auditsTaken)
     };
   }
 

@@ -23,10 +23,19 @@ export const DEFAULT_SETTINGS = {
 
   // Training
   countingSystem: 'HI_LO',
-  showCount: true,
-  showAdvice: true,
+  difficulty: 'easy',
   gradeDecisions: true,
+
+  // Flags driven by the difficulty preset (see difficulty.js)
+  showCount: true,
+  allowCountPeek: true,
+  showAdvice: true,
   showBetHint: true,
+  postHandReview: false,
+  showHandTotals: true,
+  countAudits: false,
+  gradeBets: false,
+  decisionSeconds: 0,
 
   // Session
   startingBankroll: 1000,

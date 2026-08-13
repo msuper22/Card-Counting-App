@@ -11,17 +11,45 @@ offline.
   adjustable deck penetration.
 - **Three counting systems** — Hi-Lo, Knock-Out and Omega II, with running
   count, true count and shoe penetration shown live.
-- **Hide the count** — tap the count in the status bar to blur it, keep the
-  count yourself, then tap again to check. This is the main training loop.
 - **Basic strategy and deviations** — every decision is graded against basic
   strategy plus the Illustrious 18 index plays, with deviations scored
   separately since they're the harder skill.
-- **Bet sizing guidance** — a suggested wager based on the true count and the
-  table limits, which can be turned off to practise the ramp yourself.
 - **Session tracking** — hands played, strategy accuracy, deviation accuracy,
   net result and a log of recent mistakes with the correct play.
 
 Bankroll, settings and stats persist across reloads.
+
+### Difficulty modes
+
+| | Easy | Normal | Hard |
+|---|---|---|---|
+| Count on screen | yes | yes | no |
+| Correct play shown | before you act | no | no |
+| Misplay feedback | live | explained after the hand | session end only |
+| Hand totals | shown | shown | hidden |
+| Decision timer | off | off | 12s |
+| Bet sizing graded | no | no | yes |
+| Count checks | no | no | yes |
+
+Every switch is also available individually under Settings; changing one moves
+you to a Custom profile rather than fighting the preset.
+
+### Count drill
+
+A pure counting exercise, separate from the game. It deals a shoe one card at a
+time and stops at random points to ask for the running count, grading each
+answer. Speed runs Slow → Steady → Brisk → Fast → Blitz and can be changed
+mid-drill. Shoe size and how many checks per shoe are both configurable.
+
+A complete Hi-Lo shoe always ends on zero, so the final count doubles as a
+self-check.
+
+### Diagnostics
+
+Every bet, deal, decision, count check, shuffle and settlement is written to a
+persistent log with the count at each point. **Menu → Game log** shows recent
+entries and copies the whole thing as JSON, which is the fastest way to report
+something that looked wrong.
 
 ## Running locally
 
