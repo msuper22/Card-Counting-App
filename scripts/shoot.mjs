@@ -128,6 +128,33 @@ await page.evaluate(() => window.trainer._openRatings());
 await new Promise(r => setTimeout(r, 200));
 await shoot('07-ratings');
 
+// --- deviation drill ---
+await page.evaluate(() => {
+  const app = window.trainer;
+  app._closeSheet();
+  app._startDeviationDrill();
+  const d = app.deviationDrill;
+  d.entry = d.constructor && d.entry;
+});
+await new Promise(r => setTimeout(r, 250));
+await shoot('09-deviation-drill');
+
+await page.evaluate(() => {
+  const d = window.trainer.deviationDrill;
+  d.answer(d.entry.basicPlay === d.entry.atOrAbove ? d.entry.below : d.entry.atOrAbove);
+});
+await new Promise(r => setTimeout(r, 200));
+await shoot('10-deviation-feedback');
+
+await page.evaluate(() => window.trainer.deviationDrill.destroy(true));
+await new Promise(r => setTimeout(r, 200));
+
+// --- deviation reference ---
+await page.evaluate(() => window.trainer._openDeviations());
+await new Promise(r => setTimeout(r, 200));
+await shoot('11-deviation-reference');
+await page.evaluate(() => window.trainer._closeSheet());
+
 // --- multi-seat table ---
 await page.evaluate(() => {
   const app = window.trainer;

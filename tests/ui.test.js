@@ -676,3 +676,66 @@ test('a player can be renamed without losing progress', async () => {
 
   app._stopTimer();
 });
+
+test('the casino test runs to the end of a shoe and then scores', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  button('casino test').click();
+  button('begin test').click();
+
+  assert.ok(app.exam, 'exam did not start');
+  assert.equal(app.exam.target, 1, 'default should be one full shoe');
+  assert.equal(app.exam.shoes, 0);
+
+  // Feed it enough graded decisions to be assessable, then drain the shoe
+  for (let i = 0; i < 30; i++) app._recordRating({ correct: true, kind: 'play' });
+  app._recordRating({ correct: true, kind: 'count' });
+
+  // The exam should still be running - a decision count no longer ends it
+  assert.ok(app.exam, 'exam ended before the shoe did');
+
+  // Push past the cut card and start a round, which triggers the reshuffle
+  app.game.deck.cards.length = 4;
+  app.pendingAudit = true;          // skip the count prompt for this test
+  app.game.startNewRound();
+
+  assert.equal(app.exam.shoes, 1, 'completing a shoe was not counted');
+  assert.equal(app.exam.done, true, 'exam did not mark itself finished');
+
+  await new Promise(resolve => setTimeout(resolve, 700));
+
+  assert.equal(app.exam, null, 'exam did not score itself');
+  assert.ok($('.exam__grade'), 'no grade reported');
+  assert.equal(app.profile.exams.length, 1);
+  assert.equal(app.profile.exams[0].shoes, 1, 'shoe count not recorded');
+
+  app._stopTimer();
+});
+
+test('the deviation drill is reachable and rates separately', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  button('deviations (i18)').click();
+  assert.ok($('.book__table'), 'deviation reference did not render');
+
+  button('drill these').click();
+  assert.ok(app.deviationDrill, 'drill did not start');
+  assert.ok($('.devcount__value'), 'true count not shown');
+
+  const entry = app.deviationDrill.entry;
+  app.deviationDrill.trueCount = entry.index;      // at the index
+  app.deviationDrill.render();
+  app.deviationDrill.answer(entry.atOrAbove);
+
+  assert.equal(app.deviationDrill.feedback.correct, true);
+  assert.ok(app.profile.modes.deviations.rating > 0, 'deviation rating did not move');
+  assert.equal(app.profile.modes.deviations.deviations, 1, 'not counted as a deviation');
+
+  app.deviationDrill.destroy(true);
+  assert.equal(app.deviationDrill, null);
+  assert.ok($('.felt'), 'table not restored');
+
+  app._stopTimer();
+});

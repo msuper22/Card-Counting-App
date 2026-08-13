@@ -44,7 +44,8 @@ export const DEFAULT_SETTINGS = {
 
   // Session
   startingBankroll: 1000,
-  haptics: true
+  haptics: true,
+  sounds: true
 };
 
 function readRaw() {

@@ -1264,3 +1264,28 @@ button {
 }
 
 .otherseat__total--bust { color: var(--lose); }
+
+/* ---------- deviation drill ---------- */
+
+.devcount { display: flex; justify-content: center; }
+
+.devcount__box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.4rem 1.1rem;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.devcount__label {
+  font-size: 0.5625rem;
+  letter-spacing: 0.12em;
+  color: var(--text-faint);
+}
+
+.devcount__value { font-size: 1.75rem; font-weight: 800; line-height: 1; }
+.devcount__value.is-pos { color: var(--win); }
+.devcount__value.is-neg { color: var(--lose); }

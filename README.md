@@ -17,7 +17,9 @@ offline.
 - **Session tracking** — hands played, strategy accuracy, deviation accuracy,
   net result and a log of recent mistakes with the correct play.
 
-Bankroll, settings and stats persist across reloads.
+Sound is synthesised with the Web Audio API rather than loaded from files, so
+the app stays a single small bundle that works offline with nothing extra to
+cache. Bankroll, settings and stats persist across reloads.
 
 ### Difficulty modes
 
@@ -53,11 +55,22 @@ The full basic strategy chart (hard totals, soft totals, pairs), colour-coded
 and generated from the rules currently in force. Turn surrender off and the
 surrender block disappears; switch to S17 and the chart adjusts.
 
+### Deviation drill
+
+The Illustrious 18 in isolation. Each spot shows a hand, an upcard and a true
+count deliberately set within a point or two of the index — a spot at +9
+answers itself. Wrong answers explain which side of the index the count fell on
+and why the play exists. Rated separately from basic strategy, since knowing
+the index and knowing which side you're on are different skills.
+
+**Menu → Deviations (I18)** shows the same table as a reference chart, with a
+button straight into the drill.
+
 ### Casino test
 
 Realistic six-deck conditions — no count, no hand totals, timed decisions,
-bet sizing graded — run over 30, 50 or 100 decisions and scored into a letter
-grade with a readiness verdict. It is graded on the weakest link rather than an
+bet sizing graded — run to the cut card so you count a whole shoe start to
+finish, then scored into a letter grade with a readiness verdict. It is graded on the weakest link rather than an
 average, because a dropped count costs more at a real table than not counting
 at all. **Nothing in a test touches your ratings.**
 

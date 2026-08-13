@@ -15,6 +15,7 @@ export const MODES = {
   normal: { label: 'Normal', weight: 1.0 },
   hard: { label: 'Hard', weight: 1.5 },
   strategy: { label: 'Strategy drill', weight: 1.0 },
+  deviations: { label: 'Deviation drill', weight: 1.4 },
   count: { label: 'Count drill', weight: 1.2 },
   exam: { label: 'Casino test', weight: 0 }   // scored, but never banked
 };

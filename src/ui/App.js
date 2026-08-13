@@ -17,7 +17,12 @@ import { el, replace, money, signed, buzz } from './dom.js';
 import { renderCard } from './CardView.js';
 import CountDrill from './CountDrill.js';
 import StrategyDrill from './StrategyDrill.js';
+import DeviationDrill from './DeviationDrill.js';
 import { renderBook } from './Book.js';
+import Sound from '../sound.js';
+import {
+  ILLUSTRIOUS_18, handLabel as devHandLabel, upLabel as devUpLabel, indexLabel
+} from '../deviations.js';
 import { DIFFICULTIES, applyDifficulty, detectDifficulty } from '../difficulty.js';
 import {
   MODES, tierFor, applyResult, accuracies, overallRating, assessReadiness
@@ -56,6 +61,7 @@ class App {
     // The profile owns its settings; loadSettings() is only the first-run seed
     this.settings = { ...DEFAULT_SETTINGS, ...(this.profile.settings || loadSettings()) };
     this.log = new GameLog();
+    this.sound = new Sound({ enabled: this.settings.sounds !== false });
 
     // Exam runs use real hard-mode conditions but bank nothing
     this.exam = null;
@@ -271,17 +277,15 @@ class App {
       'insuranceOffered', 'insuranceResolved', 'deckReshuffled'
     ].forEach(event => this.game.addEventListener(event, rerender));
 
+    ['playerHit', 'playerDouble', 'playerSplit'].forEach(event => {
+      this.game.addEventListener(event, () => this.sound.play('deal'));
+    });
+
     this.game.addEventListener('payoutPhaseStarted', data => {
       this._logRoundEnd(data.results);
       this._showResults(data.results);
       this.render();
       this._persist();
-
-      // The test scores itself once the hand in progress completes
-      if (this.exam && this.exam.done) {
-        setTimeout(() => this._finishExam(), 1200);
-        return;
-      }
 
       // Normal mode explains misplays once the hand is over
       if (this.settings.postHandReview) {
@@ -299,6 +303,7 @@ class App {
 
     // Diagnostics: record the shape of every hand as it happens
     this.game.addEventListener('initialCardsDealt', data => {
+      this.sound.play('deal');
       const state = data.state;
       this.log.append('dealt', {
         round: state.roundNumber,
@@ -311,7 +316,17 @@ class App {
     });
 
     this.game.addEventListener('deckReshuffled', () => {
+      this.sound.play('shuffle');
       this.log.append('shuffled', { round: this.game.roundNumber });
+
+      // A completed shoe is what the casino test measures
+      if (this.exam) {
+        this.exam.shoes = (this.exam.shoes || 0) + 1;
+        if (this.exam.shoes >= this.exam.target) {
+          this.exam.done = true;
+          setTimeout(() => this._finishExam(), 500);
+        }
+      }
     });
 
     this.game.addEventListener('insuranceOffered', () => {
@@ -796,6 +811,7 @@ class App {
     const next = this.pendingBet + value;
     this.pendingBet = Math.min(next, bankroll, this.settings.maxBet);
     if (this.settings.haptics) buzz();
+    this.sound.play('chip');
     this.render();
   }
 
@@ -1021,6 +1037,7 @@ class App {
    */
   _openAudit() {
     this.pendingAudit = true;
+    this.sound.play('prompt');
 
     const input = el('input.audit__input', {
       type: 'number',
@@ -1082,6 +1099,7 @@ class App {
     });
 
     if (this.settings.haptics) buzz(result.correct ? [10, 40, 10] : 20);
+    this.sound.play(result.correct ? 'correct' : 'wrong');
 
     const stats = this.trainer.getStats();
 
@@ -1213,6 +1231,12 @@ class App {
     }
 
     if (this.settings.haptics) buzz(net > 0 ? [10, 40, 10] : 12);
+
+    const tone = hands.length === 1 && hands[0].result === 'blackjack' ? 'blackjack'
+      : net > 0 ? 'win'
+      : net < 0 ? 'lose'
+      : 'push';
+    this.sound.play(tone);
   }
 
   /** @private */
@@ -1278,11 +1302,6 @@ class App {
     if (this.exam) {
       this.exam.events.push({ ...event, mode: 'exam' });
 
-      // Let the hand in progress finish before scoring
-      const plays = this.exam.events.filter(e => e.kind === 'play').length;
-      if (plays >= this.exam.target) {
-        this.exam.done = true;
-      }
       return;
     }
 
@@ -1354,10 +1373,16 @@ class App {
           type: 'button', text: 'Strategy drill', onclick: () => this._startStrategyDrill()
         }),
         el('button.btn.btn--wide', {
+          type: 'button', text: 'Deviation drill', onclick: () => this._startDeviationDrill()
+        }),
+        el('button.btn.btn--wide', {
           type: 'button', text: 'Count drill', onclick: () => this._openDrillSetup()
         }),
         el('button.btn.btn--wide', {
           type: 'button', text: 'The Book', onclick: () => this._openBook()
+        }),
+        el('button.btn.btn--wide', {
+          type: 'button', text: 'Deviations (I18)', onclick: () => this._openDeviations()
         }),
         el('button.btn.btn--wide', {
           type: 'button',
@@ -1398,6 +1423,71 @@ class App {
     this._openSheet('The Book', renderBook(this.settings));
   }
 
+  /**
+   * The Illustrious 18 as a reference table, sitting alongside The Book.
+   * @private
+   */
+  _openDeviations() {
+    const rows = ILLUSTRIOUS_18.map(entry => el('tr', {}, [
+      el('th.book__rowhead', { text: devHandLabel(entry) }),
+      el('td.book__cell', { text: entry.kind === 'insurance' ? 'A' : devUpLabel(entry) }),
+      el('td.book__cell.book__cell--D', { text: indexLabel(entry) }),
+      el('td.book__cell.book__cell--P', { text: entry.atOrAbove }),
+      el('td.book__cell.book__cell--H', { text: entry.below })
+    ]));
+
+    this._openSheet('Deviations — Illustrious 18', el('div.book', {}, [
+      el('p.field__hint', {
+        text: 'The index plays worth most of what counting earns. Read the index as the ' +
+              'true count at which the play changes: at or above it, use the third column; ' +
+              'below it, the fourth.',
+        style: 'margin-bottom:0.75rem;line-height:1.45'
+      }),
+      el('div.book__scroll', {}, el('table.book__table', {}, [
+        el('thead', {}, el('tr', {}, [
+          el('th.book__corner', { text: 'Hand' }),
+          el('th', { text: 'vs' }),
+          el('th', { text: 'Index' }),
+          el('th', { text: 'At/above' }),
+          el('th', { text: 'Below' })
+        ])),
+        el('tbody', {}, rows)
+      ])),
+      el('div.actions', { style: 'margin-top:1rem' }, [
+        el('button.btn.btn--primary.btn--wide', {
+          type: 'button',
+          text: 'Drill these',
+          onclick: () => this._startDeviationDrill()
+        })
+      ])
+    ]));
+  }
+
+  /* ===================== deviation drill ===================== */
+
+  /** @private */
+  _startDeviationDrill() {
+    this._closeSheet();
+    this._stopTimer();
+    this.log.append('deviationDrillStarted', {});
+
+    this.deviationDrill = new DeviationDrill(this.container, {
+      haptics: this.settings.haptics,
+      sound: this.sound,
+      log: this.log,
+      onResult: event => this._recordRating(event),
+      onExit: () => {
+        const drill = this.deviationDrill;
+        this.deviationDrill = null;
+        this.log.append('deviationDrillFinished', {
+          asked: drill.asked, right: drill.right, bestStreak: drill.bestStreak
+        });
+        this._buildFrame();
+        this.render();
+      }
+    });
+  }
+
   /* ===================== strategy drill ===================== */
 
   /** @private */
@@ -1408,6 +1498,7 @@ class App {
     this.log.append('strategyDrillStarted', {});
 
     this.strategyDrill = new StrategyDrill(this.container, {
+      sound: this.sound,
       hitSoft17: this.settings.hitSoft17,
       surrender: this.settings.allowSurrender,
       doubleAfterSplit: this.settings.allowDoubleAfterSplit,
@@ -1475,7 +1566,7 @@ class App {
 
       el('h3.status__label', { text: 'By mode', style: 'margin:0.5rem 0 0.4rem' }),
       el('div', { style: 'display:flex;flex-direction:column;gap:0.5rem' },
-        ['easy', 'normal', 'hard', 'strategy', 'count'].map(card)),
+        ['easy', 'normal', 'hard', 'strategy', 'deviations', 'count'].map(card)),
 
       this.profile.exams && this.profile.exams.length
         ? el('div', {}, [
@@ -1686,12 +1777,16 @@ class App {
       el('div.field', {}, [
         el('div', {}, [
           el('div.field__label', { text: 'Length' }),
-          el('span.field__hint', { text: 'Decisions before the assessment is scored' })
+          el('span.field__hint', {
+            text: 'The test runs to the cut card, so you count a whole shoe start to finish'
+          })
         ]),
         el('select', {
           onchange: event => { this.examTarget = Number(event.target.value); }
-        }, [30, 50, 100].map(n => el('option', {
-          value: String(n), text: `${n} decisions`, selected: n === (this.examTarget || 50)
+        }, [1, 2, 3].map(n => el('option', {
+          value: String(n),
+          text: n === 1 ? 'One full shoe' : `${n} shoes`,
+          selected: n === (this.examTarget || 1)
         })))
       ]),
       el('div.actions', { style: 'margin-top:1rem' }, [
@@ -1711,7 +1806,8 @@ class App {
     this.examPreviousSettings = { ...this.settings };
     this.exam = {
       events: [],
-      target: this.examTarget || 50,
+      shoes: 0,
+      target: this.examTarget || 1,
       startedAt: new Date().toISOString(),
       startingBankroll: this.game ? this.game.players[this.seatIndex].bankroll : 1000
     };
@@ -1722,9 +1818,11 @@ class App {
       'hard'
     );
 
-    this.log.append('examStarted', { target: this.exam.target });
+    this.log.append('examStarted', { shoes: this.exam.target });
     this._restart();
-    this._flashAdvice(`Casino test — ${this.exam.target} decisions`);
+    this._flashAdvice(
+      this.exam.target === 1 ? 'Casino test — one full shoe' : `Casino test — ${this.exam.target} shoes`
+    );
   }
 
   /**
@@ -1754,6 +1852,7 @@ class App {
 
     const record = {
       at: this.exam.startedAt,
+      shoes: this.exam.shoes,
       grade: assessment.grade,
       ready: assessment.ready,
       accuracy: result.accuracy ?? 0,
@@ -2186,6 +2285,7 @@ class App {
       toggle('gradeDecisions', 'Grade my decisions'),
       toggle('showBetHint', 'Suggest bet size'),
       toggle('haptics', 'Vibration feedback'),
+      toggle('sounds', 'Sound effects'),
       select('countingSystem', 'Counting system', [
         ['HI_LO', 'Hi-Lo'], ['KO', 'Knock-Out'], ['OMEGA_II', 'Omega II']
       ], 'Changing this restarts the count', String),
@@ -2282,6 +2382,11 @@ class App {
     // Hand-tuning any training flag moves you off the preset
     this.settings.difficulty = detectDifficulty(this.settings);
     saveSettings(this.settings);
+
+    if (key === 'sounds') {
+      this.sound.setEnabled(value);
+      if (value) this.sound.play('chip');
+    }
 
     if (key === 'decisionSeconds') {
       this._stopTimer();
