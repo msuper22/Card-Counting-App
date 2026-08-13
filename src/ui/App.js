@@ -1517,6 +1517,13 @@ class App {
           ]),
           isActive ? el('span.rating__tier', { text: 'PLAYING' }) : null
         ]),
+        el('button.btn', {
+          type: 'button',
+          text: '✎',
+          'aria-label': `Rename ${player.name}`,
+          style: 'flex:0 0 auto;min-width:2.75rem',
+          onclick: () => this._renamePlayer(player)
+        }),
         all.length > 1
           ? el('button.btn.btn--danger', {
               type: 'button',
@@ -1587,6 +1594,54 @@ class App {
     this._closeSheet();
     this._startSession(player.bankroll);
     this._flashAdvice(`Playing as ${player.name}`);
+  }
+
+  /**
+   * Rename a player in place, so a typo doesn't cost someone their progress.
+   * @private
+   */
+  _renamePlayer(player) {
+    const input = el('input', {
+      type: 'text',
+      value: player.name,
+      maxlength: '20',
+      style: 'width:100%;min-height:2.875rem;padding:0.35rem 0.6rem;background:var(--surface-raised);' +
+             'color:var(--text);border:1px solid var(--border);border-radius:0.5rem;font-size:1rem'
+    });
+
+    const commit = () => {
+      const name = input.value.trim();
+      if (!name) {
+        input.focus();
+        return;
+      }
+
+      // Flush whatever the live profile holds before touching storage, then
+      // update in place. Re-reading the profile here would silently roll back
+      // anything not yet persisted, such as a mid-round bankroll change.
+      if (player.id === this.profile.id) {
+        profiles.savePlayer(this.profile);
+        profiles.renamePlayer(player.id, name);
+        this.profile.name = name;
+      } else {
+        profiles.renamePlayer(player.id, name);
+      }
+
+      this.log.append('playerRenamed', { id: player.id, name });
+      this._openPlayers();
+    };
+
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') commit();
+    });
+
+    this._openSheet('Rename player', el('div', {}, [
+      input,
+      el('div.actions', { style: 'margin-top:0.75rem' }, [
+        el('button.btn', { type: 'button', text: 'Cancel', onclick: () => this._openPlayers() }),
+        el('button.btn.btn--primary', { type: 'button', text: 'Save', onclick: commit })
+      ])
+    ]));
   }
 
   /** @private */

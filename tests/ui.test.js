@@ -650,3 +650,29 @@ test('ratings are shown per mode', async () => {
 
   app._stopTimer();
 });
+
+test('a player can be renamed without losing progress', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+
+  // Give the player something to lose
+  app.profile.modes.normal.rating = 350;
+  app.profile.bankroll = 777;
+
+  button('menu').click();
+  button('players').click();
+
+  const rename = [...$('.sheet').querySelectorAll('button')].find(b => b.textContent.trim() === '✎');
+  assert.ok(rename, 'no rename control');
+  rename.click();
+
+  const input = $('.sheet input[type="text"]');
+  assert.equal(input.value, app.profile.name, 'rename field not prefilled');
+  input.value = 'Renamed';
+  button('save').click();
+
+  assert.equal(app.profile.name, 'Renamed');
+  assert.equal(app.profile.modes.normal.rating, 350, 'rating lost on rename');
+  assert.equal(app.profile.bankroll, 777, 'bankroll lost on rename');
+
+  app._stopTimer();
+});
