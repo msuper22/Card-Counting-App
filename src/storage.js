@@ -37,6 +37,11 @@ export const DEFAULT_SETTINGS = {
   gradeBets: false,
   decisionSeconds: 0,
 
+  // Table seats
+  otherPlayers: 0,
+  seatIndex: 0,
+  seatDelayMs: 2000,
+
   // Session
   startingBankroll: 1000,
   haptics: true

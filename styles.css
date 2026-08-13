@@ -225,8 +225,10 @@ button {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: 0.5rem;
+  /* Centre the two seats with bounded spacing. space-between left a dead
+     gap the height of the screen on tall phones. */
+  justify-content: center;
+  gap: clamp(1rem, 7vh, 3.5rem);
   padding: var(--pad);
   background:
     radial-gradient(ellipse at 50% 30%, var(--felt) 0%, var(--felt-dark) 70%, var(--bg) 100%);
@@ -295,12 +297,13 @@ button {
 
 .hand__cards {
   display: flex;
-  /* Overlap cards so a five-card hand still fits a narrow screen */
-  padding-left: calc(var(--card-w) * 0.45);
+  /* Overlap cards enough that a six-card hand still fits a narrow screen,
+     but not so much that a normal two-card hand looks squashed. */
+  padding-left: calc(var(--card-w) * 0.22);
 }
 
 .hand__cards > * {
-  margin-left: calc(var(--card-w) * -0.45);
+  margin-left: calc(var(--card-w) * -0.22);
 }
 
 .hand__bet {
@@ -929,3 +932,335 @@ button {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------- strategy drill ---------- */
+
+.felt.strategy {
+  justify-content: center;
+  gap: 1rem;
+}
+
+.strategy__ask {
+  max-width: 20rem;
+  margin: 0 auto;
+  font-size: 0.9375rem;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.drill__feedback { width: 100%; }
+
+.verdict {
+  width: 100%;
+  max-width: 24rem;
+  margin: 0 auto;
+  padding: 0.85rem;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+}
+
+.verdict.is-right { border-left-color: var(--win); }
+.verdict.is-wrong { border-left-color: var(--lose); }
+
+.verdict__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.verdict__word {
+  font-size: 1.125rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.is-right .verdict__word { color: var(--win); }
+.is-wrong .verdict__word { color: var(--lose); }
+
+.verdict__line { font-size: 0.9375rem; margin-bottom: 0.2rem; }
+.verdict__best { color: var(--win); }
+.verdict__ev { color: var(--text-dim); font-weight: 600; }
+
+.verdict__cost {
+  margin-bottom: 0.35rem;
+  font-size: 0.8125rem;
+  color: var(--lose);
+}
+
+.verdict__reason {
+  margin-bottom: 0.4rem;
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.verdict__tip {
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.verdict__tipLabel {
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--gold);
+}
+
+/* ---------- the book ---------- */
+
+.book__section { margin-bottom: 1.25rem; }
+
+.book__title {
+  margin-bottom: 0.4rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* The chart is wider than a phone, so it scrolls inside its own box */
+.book__scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+}
+
+.book__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.book__table th {
+  padding: 0.3rem 0.15rem;
+  background: var(--surface-raised);
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+}
+
+.book__rowhead {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 2.75rem;
+  background: var(--surface-raised);
+}
+
+.book__cell {
+  padding: 0.3rem 0.15rem;
+  min-width: 1.6rem;
+  color: #10231a;
+}
+
+/* Colour-coded so the shape of the chart is learnable, not just readable */
+.book__cell--H { background: #2c4536; color: var(--text); }
+.book__cell--S { background: #cf6b6b; }
+.book__cell--D { background: #d4af37; }
+.book__cell--P { background: #5fbf7f; }
+.book__cell--R { background: #9b7fd4; }
+
+.book__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 0.85rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.book__key { display: flex; align-items: center; gap: 0.3rem; }
+
+.book__key .book__cell {
+  display: inline-grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 0.25rem;
+  font-size: 0.6875rem;
+}
+
+/* ---------- players and ratings ---------- */
+
+.player-list { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.player {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-align: left;
+  width: 100%;
+}
+
+.player.is-active { border-color: var(--gold); }
+
+.player__avatar {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 2.25rem;
+  height: 2.25rem;
+  background: var(--felt);
+  border-radius: 50%;
+  font-weight: 800;
+}
+
+.player__body { flex: 1; min-width: 0; }
+
+.player__name {
+  font-size: 0.9375rem;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player__meta { font-size: 0.6875rem; color: var(--text-faint); }
+
+.rating {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--surface-raised);
+  border-radius: var(--radius);
+}
+
+.rating__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.rating__mode { font-size: 0.875rem; font-weight: 650; }
+.rating__tier { font-size: 0.75rem; color: var(--gold); font-weight: 700; }
+
+.rating__bar {
+  height: 0.4rem;
+  background: var(--bg);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.rating__fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--gold));
+  border-radius: 999px;
+  transition: width 0.4s ease;
+}
+
+.rating__meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.6875rem;
+  color: var(--text-faint);
+}
+
+/* ---------- exam ---------- */
+
+.exam__grade {
+  display: grid;
+  place-items: center;
+  width: 4.5rem;
+  height: 4.5rem;
+  margin: 0 auto 0.75rem;
+  border: 3px solid var(--gold);
+  border-radius: 50%;
+  font-size: 2rem;
+  font-weight: 800;
+  color: var(--gold);
+}
+
+.exam__grade--pass { border-color: var(--win); color: var(--win); }
+.exam__grade--fail { border-color: var(--lose); color: var(--lose); }
+
+.exam__verdict {
+  margin-bottom: 0.75rem;
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.exam__notes { display: flex; flex-direction: column; gap: 0.4rem; }
+
+.exam__note {
+  padding: 0.5rem 0.65rem;
+  background: var(--surface-raised);
+  border-left: 3px solid var(--border);
+  border-radius: 0.3rem;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.exam__banner {
+  padding: 0.4rem var(--pad);
+  background: var(--gold);
+  color: #2a2100;
+  font-size: 0.6875rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+/* ---------- other players at the table ---------- */
+
+.seats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.seats--others { --card-w: clamp(1.75rem, 8vw, 2.75rem); }
+
+.otherseat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.25rem;
+  border: 2px solid transparent;
+  border-radius: 0.5rem;
+  opacity: 0.75;
+  transition: opacity 0.2s ease, border-color 0.2s ease;
+}
+
+.otherseat.is-acting {
+  border-color: var(--accent);
+  opacity: 1;
+}
+
+.otherseat.is-you {
+  border-color: var(--gold);
+  opacity: 1;
+}
+
+.otherseat__name {
+  font-size: 0.5625rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.otherseat__total {
+  font-size: 0.625rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.otherseat__total--bust { color: var(--lose); }

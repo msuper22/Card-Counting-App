@@ -10,7 +10,7 @@
  */
 
 // Bump this on every deploy to invalidate the old shell.
-const CACHE = 'ccapp-v2';
+const CACHE = 'ccapp-v3';
 
 const SHELL = [
   './',

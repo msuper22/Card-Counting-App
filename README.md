@@ -34,6 +34,48 @@ Bankroll, settings and stats persist across reloads.
 Every switch is also available individually under Settings; changing one moves
 you to a Custom profile rather than fighting the preset.
 
+### Strategy drill
+
+Pure basic strategy, one spot at a time, no betting or shoe to track. Answer
+and you're told immediately whether it was right. If not, you get the correct
+play, what the mistake cost in expected value, a short reason, and one concrete
+number — e.g. doubling 9 against a 7 returns *"Don't double into dealer
+strength here"* and *"Dealer 7 busts only 26%; preserve flexibility."*
+
+Every figure is computed by the EV engine (`src/EV.js`), not looked up, so the
+feedback stays correct if you change the table rules. Near-tie cells such as
+A,2 vs 5 — where published charts disagree with each other — are accepted
+rather than marked wrong.
+
+### The Book
+
+The full basic strategy chart (hard totals, soft totals, pairs), colour-coded
+and generated from the rules currently in force. Turn surrender off and the
+surrender block disappears; switch to S17 and the chart adjusts.
+
+### Casino test
+
+Realistic six-deck conditions — no count, no hand totals, timed decisions,
+bet sizing graded — run over 30, 50 or 100 decisions and scored into a letter
+grade with a readiness verdict. It is graded on the weakest link rather than an
+average, because a dropped count costs more at a real table than not counting
+at all. **Nothing in a test touches your ratings.**
+
+### Players and ratings
+
+Multiple players share the app, each with their own bankroll, settings, and
+per-mode progression. Every mode carries an independent 0–1000 rating across
+nine tiers from Novice to Card Counter. Mistakes cost more than correct plays
+earn, and harder modes pay more per hand, so the number reflects real skill
+rather than volume.
+
+### Other players at the table
+
+Seat up to five bots playing basic strategy, and choose your own position from
+first to third base. Each takes a moment to act before the action reaches you,
+and their cards count — which is what makes a real table harder than a
+heads-up game.
+
 ### Count drill
 
 A pure counting exercise, separate from the game. It deals a shoe one card at a

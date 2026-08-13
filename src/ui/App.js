@@ -16,7 +16,14 @@ import GameLog from '../GameLog.js';
 import { el, replace, money, signed, buzz } from './dom.js';
 import { renderCard } from './CardView.js';
 import CountDrill from './CountDrill.js';
+import StrategyDrill from './StrategyDrill.js';
+import { renderBook } from './Book.js';
 import { DIFFICULTIES, applyDifficulty, detectDifficulty } from '../difficulty.js';
+import {
+  MODES, tierFor, applyResult, accuracies, overallRating, assessReadiness
+} from '../rating.js';
+import * as profiles from '../profiles.js';
+import { analyze, describe as describeHand, rankValue } from '../EV.js';
 import {
   loadSettings, saveSettings, loadSession, saveSession, clearSession, DEFAULT_SETTINGS
 } from '../storage.js';
@@ -43,8 +50,15 @@ class App {
    */
   constructor(container) {
     this.container = container;
-    this.settings = loadSettings();
+
+    // Settings and progression belong to a player, not the device
+    this.profile = profiles.activePlayer();
+    // The profile owns its settings; loadSettings() is only the first-run seed
+    this.settings = { ...DEFAULT_SETTINGS, ...(this.profile.settings || loadSettings()) };
     this.log = new GameLog();
+
+    // Exam runs use real hard-mode conditions but bank nothing
+    this.exam = null;
 
     // Cards already shown, so re-renders don't replay the deal animation
     this.seenCards = new Set();
@@ -136,6 +150,7 @@ class App {
     this.nodes.dealerHands = el('div.hands');
     this.nodes.playerTotal = el('span.seat__total', { text: '–' });
     this.nodes.playerHands = el('div.hands');
+    this.nodes.otherSeats = el('div.seats.seats--others');
 
     this.nodes.felt = el('main.felt', {}, [
       el('section.seat', {}, [
@@ -145,6 +160,7 @@ class App {
         ]),
         this.nodes.dealerHands
       ]),
+      this.nodes.otherSeats,
       el('section.seat', {}, [
         this.nodes.playerHands,
         el('div.seat__label', {}, [
@@ -183,10 +199,13 @@ class App {
       ? freshBankroll
       : (saved && typeof saved.bankroll === 'number' ? saved.bankroll : this.settings.startingBankroll);
 
+    const others = Math.max(0, Math.min(5, this.settings.otherPlayers || 0));
+    this.seatIndex = Math.min(this.settings.seatIndex || 0, others);
+
     this.game = new Game({
       numberOfDecks: this.settings.numberOfDecks,
       reshuffleThreshold: this.settings.reshuffleThreshold,
-      maxPlayers: 1,
+      maxPlayers: others + 1,
       tableMinimum: this.settings.minBet,
       tableMaximum: this.settings.maxBet,
       blackjackPayout: this.settings.blackjackPayout,
@@ -196,11 +215,25 @@ class App {
       hitSoft17: this.settings.hitSoft17
     });
 
-    this.game.addPlayer('You', bankroll, {
-      autoPlay: false,
-      strategyLevel: 'counting',
-      countingSystem: this.settings.countingSystem
-    });
+    // Seat everyone in order, with the human at their chosen position
+    const BOT_NAMES = ['Ann', 'Ben', 'Cy', 'Dee', 'Eli'];
+    let botNumber = 0;
+
+    for (let seat = 0; seat <= others; seat++) {
+      if (seat === this.seatIndex) {
+        this.game.addPlayer('You', bankroll, {
+          autoPlay: false,
+          strategyLevel: 'counting',
+          countingSystem: this.settings.countingSystem
+        });
+      } else {
+        const bot = this.game.addPlayer(BOT_NAMES[botNumber++], 100000, {
+          autoPlay: true,
+          strategyLevel: 'basic'
+        });
+        bot.isBot = true;
+      }
+    }
 
     this.trainer = new Trainer(this.game, {
       countingSystem: this.settings.countingSystem,
@@ -244,6 +277,12 @@ class App {
       this.render();
       this._persist();
 
+      // The test scores itself once the hand in progress completes
+      if (this.exam && this.exam.done) {
+        setTimeout(() => this._finishExam(), 1200);
+        return;
+      }
+
       // Normal mode explains misplays once the hand is over
       if (this.settings.postHandReview) {
         const mistakes = this.trainer.getRoundMistakes();
@@ -263,7 +302,7 @@ class App {
       const state = data.state;
       this.log.append('dealt', {
         round: state.roundNumber,
-        player: GameLog.describeHand(state.players[0].hands[0]),
+        player: GameLog.describeHand(state.players[this.seatIndex].hands[0]),
         dealerUp: state.dealer.upCard ? `${state.dealer.upCard.rank}${state.dealer.upCard.suit[0]}` : null,
         rc: this.trainer.getCount().running,
         tc: this.trainer.getCount().true,
@@ -296,7 +335,7 @@ class App {
     this.log.append('settled', {
       round: state.roundNumber,
       dealer: `${state.dealer.hand.map(c => `${c.rank}${c.suit[0]}`).join(' ')} (${state.dealer.fullValue})`,
-      hands: results[0].hands
+      hands: results[this.seatIndex].hands
         .filter(hand => hand.bet > 0)
         .map(hand => ({
           bet: hand.bet,
@@ -304,7 +343,7 @@ class App {
           result: hand.result,
           net: hand.net
         })),
-      bankroll: results[0].bankroll,
+      bankroll: results[this.seatIndex].bankroll,
       mistakes: this.trainer.getRoundMistakes().length
     });
   }
@@ -314,7 +353,8 @@ class App {
   /** Re-render everything from current game state */
   render() {
     const state = this.game.getGameState();
-    const player = state.players[0];
+    this._driveBots();
+    const player = state.players[this.seatIndex];
 
     this.nodes.bankroll.textContent = money(player.bankroll);
     this.nodes.roundLabel.textContent = `#${state.roundNumber}`;
@@ -322,9 +362,44 @@ class App {
     this._renderCount(state);
     this._renderShoe(state);
     this._renderDealer(state);
+    this._renderOtherSeats(state);
     this._renderPlayer(state, player);
     this._renderAdvice(state);
     this._renderControls(state, player);
+  }
+
+  /**
+   * Render the other people at the table. Their cards count too, which is the
+   * whole reason for having them.
+   * @private
+   */
+  _renderOtherSeats(state) {
+    if (state.players.length <= 1) {
+      replace(this.nodes.otherSeats, []);
+      return;
+    }
+
+    const seats = state.players
+      .map((player, index) => ({ player, index }))
+      .filter(entry => entry.index !== this.seatIndex)
+      .map(({ player, index }) => {
+        const acting = state.gamePhase === 'playerTurn' && state.currentPlayerIndex === index;
+        const hand = player.hands[0];
+        const busted = player.hands.some(h => h.busted);
+
+        return el(`div.otherseat${acting ? '.is-acting' : ''}`, {}, [
+          el('div.otherseat__name', { text: player.name }),
+          el('div.hand__cards', {},
+            (hand ? hand.cards : []).map((card, i) => this._card(card, i))),
+          this.settings.showHandTotals && hand && hand.cards.length
+            ? el(`div.otherseat__total${busted ? '.otherseat__total--bust' : ''}`, {
+                text: busted ? 'bust' : String(hand.value)
+              })
+            : null
+        ]);
+      });
+
+    replace(this.nodes.otherSeats, seats);
   }
 
   /** @private */
@@ -625,7 +700,9 @@ class App {
           type: 'button',
           text: 'No thanks',
           onclick: () => this._insure(false, advised)
-        })
+        }),
+        // The menu has to stay reachable in every phase, including this one
+        this._menuButton()
       ])
     ]);
   }
@@ -729,7 +806,7 @@ class App {
     this.pendingBet = bet;
     if (this.settings.haptics) buzz();
 
-    const bankroll = this.game.players[0].bankroll;
+    const bankroll = this.game.players[this.seatIndex].bankroll;
     const count = this.trainer.getCount();
 
     // Hard mode grades the wager too - the ramp is where counting pays
@@ -748,7 +825,15 @@ class App {
       suggested: betGrade ? betGrade.expected : null
     });
 
-    this.game.placeBet(0, bet);
+    // Seat the bots' wagers first; the deal triggers once everyone has bet,
+    // so the human's bet must be the one that closes it.
+    this.game.players.forEach((player, index) => {
+      if (index !== this.seatIndex && player.currentBet === 0) {
+        this.game.placeBet(index, this.settings.minBet);
+      }
+    });
+
+    this.game.placeBet(this.seatIndex, bet);
     this._startTimer();
     this._persist();
   }
@@ -776,13 +861,21 @@ class App {
     this._stopTimer();
 
     const before = this.game.getGameState();
-    const handBefore = before.players[0].hands[before.currentHandIndex];
+    const handBefore = before.players[this.seatIndex].hands[before.currentHandIndex];
 
     // Grade before acting. A bust or a final stand settles the whole round
     // synchronously inside playerAction, and the post-hand review reads the
     // round's mistakes at that moment - grading afterwards would arrive too
     // late and the review would come up empty.
     this.lastGrade = advice ? this.trainer.recordDecision(action, advice) : null;
+
+    if (this.lastGrade) {
+      this._recordRating({
+        correct: this.lastGrade.correct,
+        isDeviation: this.lastGrade.wasDeviation,
+        kind: 'play'
+      });
+    }
 
     const ok = this.game.playerAction(action);
     if (!ok) {
@@ -885,7 +978,7 @@ class App {
       );
     }
     if (this.settings.haptics) buzz();
-    this.game.placeInsurance(0, take);
+    this.game.placeInsurance(this.seatIndex, take);
   }
 
   /** @private */
@@ -977,6 +1070,7 @@ class App {
   /** @private */
   _gradeAudit(entered) {
     const result = this.trainer.recordCountAudit(entered);
+    this._recordRating({ correct: result.correct, kind: 'count' });
 
     this.log.append('countAudit', {
       round: this.game.roundNumber,
@@ -1081,7 +1175,7 @@ class App {
   /** @private */
   _rebuy() {
     this.settings.startingBankroll = this.settings.startingBankroll || 1000;
-    this.game.players[0].bankroll = this.settings.startingBankroll;
+    this.game.players[this.seatIndex].bankroll = this.settings.startingBankroll;
     this._persist();
     this._nextHand();
   }
@@ -1092,7 +1186,7 @@ class App {
   _showResults(results) {
     if (!results || !results.length) return;
 
-    const hands = results[0].hands.filter(hand => hand.bet > 0);
+    const hands = results[this.seatIndex].hands.filter(hand => hand.bet > 0);
     if (!hands.length) return;
 
     const net = hands.reduce((sum, hand) => sum + hand.net, 0);
@@ -1150,11 +1244,51 @@ class App {
 
   /** @private */
   _persist() {
-    saveSession({
-      bankroll: this.game.players[0].bankroll,
-      lastBet: this.pendingBet,
-      stats: this.trainer.stats
-    });
+    const bankroll = this.game.players[this.seatIndex || 0].bankroll;
+
+    saveSession({ bankroll, lastBet: this.pendingBet, stats: this.trainer.stats });
+
+    // The profile is the durable record; the session blob is just fast state
+    this.profile.bankroll = bankroll;
+    this.profile.lastBet = this.pendingBet;
+    this.profile.settings = this.settings;
+    profiles.savePlayer(this.profile);
+  }
+
+  /* ===================== progression ===================== */
+
+  /**
+   * Which rating bucket the current activity belongs to.
+   * @private
+   */
+  _currentMode() {
+    if (this.exam) return 'exam';
+    const difficulty = this.settings.difficulty;
+    return ['easy', 'normal', 'hard'].includes(difficulty) ? difficulty : 'normal';
+  }
+
+  /**
+   * Bank a graded event against the active player's progression.
+   * Exam runs are scored for the report but never affect lifetime stats.
+   * @private
+   */
+  _recordRating(event) {
+    const mode = event.mode || this._currentMode();
+
+    if (this.exam) {
+      this.exam.events.push({ ...event, mode: 'exam' });
+
+      // Let the hand in progress finish before scoring
+      const plays = this.exam.events.filter(e => e.kind === 'play').length;
+      if (plays >= this.exam.target) {
+        this.exam.done = true;
+      }
+      return;
+    }
+
+    this.profile.modes[mode] = applyResult(this.profile.modes[mode], { ...event, mode });
+    this.profile.modes[mode].lastPlayed = new Date().toISOString();
+    profiles.savePlayer(this.profile);
   }
 
   /* ===================== sheets ===================== */
@@ -1217,7 +1351,29 @@ class App {
 
       el('div.actions', { style: 'margin-bottom:0.75rem' }, [
         el('button.btn.btn--primary.btn--wide', {
+          type: 'button', text: 'Strategy drill', onclick: () => this._startStrategyDrill()
+        }),
+        el('button.btn.btn--wide', {
           type: 'button', text: 'Count drill', onclick: () => this._openDrillSetup()
+        }),
+        el('button.btn.btn--wide', {
+          type: 'button', text: 'The Book', onclick: () => this._openBook()
+        }),
+        el('button.btn.btn--wide', {
+          type: 'button',
+          text: this.exam ? 'End casino test' : 'Casino test',
+          onclick: () => (this.exam ? this._finishExam() : this._openExamSetup())
+        }),
+        el('button.btn.btn--wide', {
+          type: 'button', text: 'Ratings', onclick: () => this._openRatings()
+        }),
+        el('button.btn.btn--wide', {
+          type: 'button',
+          text: `Players (${this.profile.name})`,
+          onclick: () => this._openPlayers()
+        }),
+        el('button.btn.btn--wide', {
+          type: 'button', text: 'Table seats', onclick: () => this._openSeats()
         }),
         el('button.btn.btn--wide', {
           type: 'button', text: 'Session stats', onclick: () => this._openStats()
@@ -1235,6 +1391,220 @@ class App {
     ]));
   }
 
+  /* ===================== the book ===================== */
+
+  /** @private */
+  _openBook() {
+    this._openSheet('The Book', renderBook(this.settings));
+  }
+
+  /* ===================== strategy drill ===================== */
+
+  /** @private */
+  _startStrategyDrill() {
+    this._closeSheet();
+    this._stopTimer();
+
+    this.log.append('strategyDrillStarted', {});
+
+    this.strategyDrill = new StrategyDrill(this.container, {
+      hitSoft17: this.settings.hitSoft17,
+      surrender: this.settings.allowSurrender,
+      doubleAfterSplit: this.settings.allowDoubleAfterSplit,
+      haptics: this.settings.haptics,
+      log: this.log,
+      onResult: event => this._recordRating(event),
+      onExit: () => {
+        const drill = this.strategyDrill;
+        this.strategyDrill = null;
+        this.log.append('strategyDrillFinished', {
+          asked: drill.asked, right: drill.right, bestStreak: drill.bestStreak
+        });
+        this._buildFrame();
+        this.render();
+      }
+    });
+  }
+
+  /* ===================== ratings ===================== */
+
+  /** @private */
+  _openRatings() {
+    const modes = this.profile.modes || {};
+    const overall = overallRating(modes);
+    const overallTier = tierFor(overall);
+
+    const card = key => {
+      const record = modes[key] || {};
+      const tier = tierFor(record.rating || 0);
+      const acc = accuracies(record);
+
+      return el('div.rating', {}, [
+        el('div.rating__head', {}, [
+          el('span.rating__mode', { text: MODES[key].label }),
+          el('span.rating__tier', { text: tier.name })
+        ]),
+        el('div.rating__bar', {}, el('div.rating__fill', {
+          style: `width:${Math.round((record.rating || 0) / 10)}%`
+        })),
+        el('div.rating__meta', {}, [
+          el('span', { text: `${record.rating || 0} / 1000` }),
+          el('span', {
+            text: acc.accuracy === null
+              ? 'not played'
+              : `${acc.accuracy}% over ${record.decisions} decisions`
+          })
+        ])
+      ]);
+    };
+
+    this._openSheet('Ratings', el('div', {}, [
+      el('div.rating', { style: 'margin-bottom:0.85rem' }, [
+        el('div.rating__head', {}, [
+          el('span.rating__mode', { text: `${this.profile.name} — overall` }),
+          el('span.rating__tier', { text: overallTier.name })
+        ]),
+        el('div.rating__bar', {}, el('div.rating__fill', {
+          style: `width:${Math.round(overall / 10)}%`
+        })),
+        el('div.rating__meta', {}, [
+          el('span', { text: `${overall} / 1000` }),
+          el('span', { text: overallTier.blurb })
+        ])
+      ]),
+
+      el('h3.status__label', { text: 'By mode', style: 'margin:0.5rem 0 0.4rem' }),
+      el('div', { style: 'display:flex;flex-direction:column;gap:0.5rem' },
+        ['easy', 'normal', 'hard', 'strategy', 'count'].map(card)),
+
+      this.profile.exams && this.profile.exams.length
+        ? el('div', {}, [
+            el('h3.status__label', { text: 'Casino tests', style: 'margin:1rem 0 0.4rem' }),
+            el('div.mistakes', {}, this.profile.exams.slice(-5).reverse().map(exam =>
+              el('div.mistake', {}, [
+                el('span', { text: new Date(exam.at).toLocaleDateString() }),
+                el('span', {}, [
+                  el('span.mistake__fix', { text: `Grade ${exam.grade}` }),
+                  el('span', { text: ` · ${exam.accuracy}%` })
+                ])
+              ])
+            ))
+          ])
+        : null
+    ]));
+  }
+
+  /* ===================== players ===================== */
+
+  /** @private */
+  _openPlayers() {
+    const all = profiles.listPlayers();
+
+    const rows = all.map(player => {
+      const overall = overallRating(player.modes || {});
+      const tier = tierFor(overall);
+      const isActive = player.id === this.profile.id;
+
+      return el('div', { style: 'display:flex;gap:0.4rem;align-items:stretch' }, [
+        el(`button.player${isActive ? '.is-active' : ''}`, {
+          type: 'button',
+          onclick: () => this._switchPlayer(player.id)
+        }, [
+          el('div.player__avatar', { text: player.name.charAt(0).toUpperCase() }),
+          el('div.player__body', {}, [
+            el('div.player__name', { text: player.name }),
+            el('div.player__meta', { text: `${tier.name} · ${overall} · ${money(player.bankroll)}` })
+          ]),
+          isActive ? el('span.rating__tier', { text: 'PLAYING' }) : null
+        ]),
+        all.length > 1
+          ? el('button.btn.btn--danger', {
+              type: 'button',
+              text: '✕',
+              'aria-label': `Delete ${player.name}`,
+              style: 'flex:0 0 auto;min-width:2.75rem',
+              onclick: () => this._deletePlayer(player.id)
+            })
+          : null
+      ]);
+    });
+
+    const nameInput = el('input', {
+      type: 'text',
+      placeholder: 'New player name',
+      maxlength: '20',
+      style: 'flex:1;min-height:2.875rem;padding:0.35rem 0.6rem;background:var(--surface-raised);' +
+             'color:var(--text);border:1px solid var(--border);border-radius:0.5rem;font-size:1rem'
+    });
+
+    this._openSheet('Players', el('div', {}, [
+      el('p.field__hint', {
+        text: 'Each player keeps their own bankroll, settings and ratings.',
+        style: 'margin-bottom:0.75rem'
+      }),
+      el('div.player-list', {}, rows),
+
+      el('div', { style: 'display:flex;gap:0.5rem;margin-top:1rem' }, [
+        nameInput,
+        el('button.btn.btn--primary', {
+          type: 'button',
+          text: 'Add',
+          onclick: () => {
+            const created = profiles.addPlayer(nameInput.value.trim() || `Player ${all.length + 1}`);
+            if (!created) {
+              this._flashAdvice('Maximum of 8 players');
+              return;
+            }
+            this._switchPlayer(created.id);
+          }
+        })
+      ]),
+
+      el('div.actions', { style: 'margin-top:1rem' }, [
+        el('button.btn.btn--danger.btn--wide', {
+          type: 'button',
+          text: `Reset ${this.profile.name}'s progress`,
+          onclick: () => {
+            profiles.resetProgress(this.profile.id);
+            this.profile = profiles.activePlayer();
+            this._restart();
+          }
+        })
+      ])
+    ]));
+  }
+
+  /** @private */
+  _switchPlayer(id) {
+    const player = profiles.selectPlayer(id);
+    if (!player) return;
+
+    this.profile = player;
+    this.settings = { ...DEFAULT_SETTINGS, ...(player.settings || {}) };
+    saveSettings(this.settings);
+
+    this.log.append('playerSwitched', { name: player.name, id });
+    this._closeSheet();
+    this._startSession(player.bankroll);
+    this._flashAdvice(`Playing as ${player.name}`);
+  }
+
+  /** @private */
+  _deletePlayer(id) {
+    if (!profiles.removePlayer(id)) {
+      this._flashAdvice('Cannot remove the last player');
+      return;
+    }
+
+    if (id === this.profile.id) {
+      this.profile = profiles.activePlayer();
+      this.settings = { ...DEFAULT_SETTINGS, ...(this.profile.settings || {}) };
+      this._startSession(this.profile.bankroll);
+    }
+
+    this._openPlayers();
+  }
+
   /** @private */
   _setDifficulty(key) {
     this.settings = applyDifficulty(this.settings, key);
@@ -1245,6 +1615,257 @@ class App {
     this._stopTimer();
     this._closeSheet();
     this._flashAdvice(`${DIFFICULTIES[key].label} mode`);
+  }
+
+  /* ===================== casino test ===================== */
+
+  /** @private */
+  _openExamSetup() {
+    this._openSheet('Casino test', el('div', {}, [
+      el('p.field__hint', {
+        text: 'A realistic assessment under full casino conditions: six decks, no count on ' +
+              'screen, no hand totals, timed decisions and your bet sizing graded. ' +
+              'Nothing here touches your ratings — it exists to tell you where you actually stand.',
+        style: 'margin-bottom:0.75rem;line-height:1.45'
+      }),
+      el('div.field', {}, [
+        el('div', {}, [
+          el('div.field__label', { text: 'Length' }),
+          el('span.field__hint', { text: 'Decisions before the assessment is scored' })
+        ]),
+        el('select', {
+          onchange: event => { this.examTarget = Number(event.target.value); }
+        }, [30, 50, 100].map(n => el('option', {
+          value: String(n), text: `${n} decisions`, selected: n === (this.examTarget || 50)
+        })))
+      ]),
+      el('div.actions', { style: 'margin-top:1rem' }, [
+        el('button.btn.btn--primary.btn--wide', {
+          type: 'button',
+          text: 'Begin test',
+          onclick: () => this._startExam()
+        })
+      ])
+    ]));
+  }
+
+  /** @private */
+  _startExam() {
+    this._closeSheet();
+
+    this.examPreviousSettings = { ...this.settings };
+    this.exam = {
+      events: [],
+      target: this.examTarget || 50,
+      startedAt: new Date().toISOString(),
+      startingBankroll: this.game ? this.game.players[this.seatIndex].bankroll : 1000
+    };
+
+    // Full casino conditions, regardless of what the player normally uses
+    this.settings = applyDifficulty(
+      { ...this.settings, numberOfDecks: 6, reshuffleThreshold: 0.25 },
+      'hard'
+    );
+
+    this.log.append('examStarted', { target: this.exam.target });
+    this._restart();
+    this._flashAdvice(`Casino test — ${this.exam.target} decisions`);
+  }
+
+  /**
+   * Score the test, report, and restore the player's normal settings.
+   * @private
+   */
+  _finishExam() {
+    if (!this.exam) return;
+
+    const events = this.exam.events;
+    const plays = events.filter(event => event.kind === 'play');
+    const checks = events.filter(event => event.kind === 'count');
+    const deviations = plays.filter(event => event.isDeviation);
+
+    const pct = (hit, total) => (total > 0 ? Math.round((hit / total) * 100) : null);
+
+    const result = {
+      decisions: plays.length,
+      accuracy: pct(plays.filter(e => e.correct).length, plays.length),
+      deviationAccuracy: pct(deviations.filter(e => e.correct).length, deviations.length),
+      countAccuracy: pct(checks.filter(e => e.correct).length, checks.length),
+      countChecks: checks.length
+    };
+
+    const assessment = assessReadiness(result);
+    const bankroll = this.game.players[this.seatIndex].bankroll;
+
+    const record = {
+      at: this.exam.startedAt,
+      grade: assessment.grade,
+      ready: assessment.ready,
+      accuracy: result.accuracy ?? 0,
+      countAccuracy: result.countAccuracy,
+      decisions: result.decisions,
+      net: bankroll - this.exam.startingBankroll
+    };
+
+    this.profile.exams = [...(this.profile.exams || []), record].slice(-20);
+    profiles.savePlayer(this.profile);
+
+    this.log.append('examFinished', record);
+
+    // Restore whatever the player was using before
+    this.exam = null;
+    if (this.examPreviousSettings) {
+      this.settings = this.examPreviousSettings;
+      this.examPreviousSettings = null;
+      saveSettings(this.settings);
+    }
+
+    this._restart();
+    this._showExamReport(assessment, result, record);
+  }
+
+  /** @private */
+  _showExamReport(assessment, result, record) {
+    const gradeClass = assessment.ready ? 'exam__grade--pass'
+      : ['D', 'F'].includes(assessment.grade) ? 'exam__grade--fail' : '';
+
+    this._openSheet('Test result', el('div', {}, [
+      el(`div.exam__grade${gradeClass ? '.' + gradeClass : ''}`, { text: assessment.grade }),
+      el('p.exam__verdict', { text: assessment.verdict }),
+
+      el('div.stats-grid', {}, [
+        el('div.stat', {}, [
+          el('div.stat__value', { text: `${result.accuracy ?? 0}%` }),
+          el('div.stat__label', { text: 'Strategy' })
+        ]),
+        el('div.stat', {}, [
+          el('div.stat__value', {
+            text: result.countAccuracy === null ? '—' : `${result.countAccuracy}%`
+          }),
+          el('div.stat__label', { text: 'Count held' })
+        ]),
+        el('div.stat', {}, [
+          el('div.stat__value', { text: String(result.decisions) }),
+          el('div.stat__label', { text: 'Decisions' })
+        ]),
+        el('div.stat', {}, [
+          el('div.stat__value', {
+            text: `${record.net >= 0 ? '+' : ''}${money(record.net)}`
+          }),
+          el('div.stat__label', { text: 'Result' })
+        ])
+      ]),
+
+      el('h3.status__label', { text: 'Notes', style: 'margin:0.85rem 0 0.4rem' }),
+      el('div.exam__notes', {}, assessment.notes.map(note =>
+        el('div.exam__note', { text: note })
+      )),
+
+      el('div.actions', { style: 'margin-top:1rem' }, [
+        el('button.btn.btn--primary.btn--wide', {
+          type: 'button', text: 'Done', onclick: () => this._closeSheet()
+        })
+      ])
+    ]));
+  }
+
+  /* ===================== table seats ===================== */
+
+  /** @private */
+  _openSeats() {
+    const others = this.settings.otherPlayers || 0;
+
+    this._openSheet('Table seats', el('div', {}, [
+      el('p.field__hint', {
+        text: 'Adding players means more cards to count between your turns, which is how a ' +
+              'real table plays. Each one takes a moment to act before the action reaches you.',
+        style: 'margin-bottom:0.75rem;line-height:1.45'
+      }),
+
+      el('div.field', {}, [
+        el('div', {}, [
+          el('div.field__label', { text: 'Other players' }),
+          el('span.field__hint', { text: 'Bots playing basic strategy' })
+        ]),
+        el('select', {
+          onchange: event => this._updateSetting('otherPlayers', Number(event.target.value), true)
+        }, [0, 1, 2, 3, 4, 5].map(n => el('option', {
+          value: String(n), text: n === 0 ? 'None' : String(n), selected: n === others
+        })))
+      ]),
+
+      el('div.field', {}, [
+        el('div', {}, [
+          el('div.field__label', { text: 'Your seat' }),
+          el('span.field__hint', { text: 'Third base acts last, first base acts first' })
+        ]),
+        el('select', {
+          onchange: event => this._updateSetting('seatIndex', Number(event.target.value), true)
+        }, Array.from({ length: others + 1 }, (unused, index) => el('option', {
+          value: String(index),
+          text: index === 0 ? 'First base'
+            : index === others ? 'Third base'
+            : `Seat ${index + 1}`,
+          selected: index === Math.min(this.settings.seatIndex || 0, others)
+        })))
+      ]),
+
+      el('div.field', {}, [
+        el('div', {}, [
+          el('div.field__label', { text: 'Pace' }),
+          el('span.field__hint', { text: 'How long each other player takes' })
+        ]),
+        el('select', {
+          onchange: event => this._updateSetting('seatDelayMs', Number(event.target.value))
+        }, [[1000, 'Fast (1s)'], [2000, 'Normal (2s)'], [3500, 'Slow (3.5s)']].map(([ms, label]) =>
+          el('option', {
+            value: String(ms), text: label, selected: ms === (this.settings.seatDelayMs || 2000)
+          })
+        ))
+      ])
+    ]));
+  }
+
+  /**
+   * Play the current bot's hand after a pause, so the table has a real rhythm
+   * and you have to track their cards.
+   * @private
+   */
+  _driveBots() {
+    clearTimeout(this.botTimer);
+
+    if (this.game.gamePhase !== 'playerTurn') return;
+
+    const index = this.game.currentPlayerIndex;
+    if (index === this.seatIndex || index >= this.game.players.length) return;
+
+    const delay = this.settings.seatDelayMs || 2000;
+
+    this.botTimer = setTimeout(() => {
+      // The turn may have moved on while we waited
+      if (this.game.gamePhase !== 'playerTurn') return;
+      if (this.game.currentPlayerIndex === this.seatIndex) return;
+
+      const hand = this.game.currentHand();
+      const upCard = this.game.dealer.getUpCard();
+      if (!hand || !upCard) return;
+
+      const actions = this.game.getAvailableActions();
+      const analysis = analyze(describeHand(hand.cards), rankValue(upCard.rank), {
+        hitSoft17: this.settings.hitSoft17,
+        surrender: this.settings.allowSurrender,
+        doubleAfterSplit: this.settings.allowDoubleAfterSplit,
+        canHit: actions.canHit,
+        canStand: actions.canStand,
+        canDouble: actions.canDouble,
+        canSplit: actions.canSplit,
+        canSurrender: actions.canSurrender
+      });
+
+      this.game.playerAction(analysis.best);
+      this.render();
+      this._driveBots();
+    }, delay);
   }
 
   /* ===================== count drill ===================== */
@@ -1376,7 +1997,7 @@ class App {
   /** @private */
   _openStats() {
     const stats = this.trainer.getStats();
-    const player = this.game.players[0];
+    const player = this.game.players[this.seatIndex];
     const net = player.bankroll - this.settings.startingBankroll;
 
     const stat = (value, label, tone = null) => el('div.stat', {}, [
@@ -1552,6 +2173,17 @@ class App {
     ]);
 
     this._openSheet('How counting works', el('div', {}, [
+      section('Game modes', [
+        'Strategy drill — pure basic strategy, one spot at a time. Wrong answers show the correct play, what the mistake costs in EV, why, and a number worth remembering.',
+        'Count drill — deals a shoe a card at a time and stops at random to ask for the running count.',
+        'Casino test — realistic six-deck conditions that score you and say whether you are ready for a real table. Nothing in it touches your ratings.',
+        'The Book — the basic strategy chart, generated from the rules you have set rather than printed, so it always matches your table.'
+      ]),
+      section('Ratings and players', [
+        'Each mode carries its own 0-1000 rating, so sharp basic strategy does not flatter a weak count.',
+        'Mistakes cost more than correct plays earn, and harder modes are worth more per hand.',
+        'Multiple players can share the app, each with their own bankroll, settings and progression.'
+      ]),
       section('Difficulty modes', [
         'Easy — the count is on screen and the correct play is named before you act.',
         'Normal — the count stays on screen but you decide alone. Anything you misplay is explained once the hand is over.',
@@ -1623,7 +2255,7 @@ class App {
    * @private
    */
   _restart() {
-    const bankroll = this.game ? this.game.players[0].bankroll : this.settings.startingBankroll;
+    const bankroll = this.game ? this.game.players[this.seatIndex].bankroll : this.settings.startingBankroll;
     this._closeSheet();
     this._startSession(bankroll);
   }

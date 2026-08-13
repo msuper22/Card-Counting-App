@@ -460,3 +460,193 @@ test('the count drill can be entered and exited cleanly', async () => {
 
   app._stopTimer();
 });
+
+/* ===================== strategy drill, book, exam ===================== */
+
+test('the strategy drill deals a spot and grades the answer', async () => {
+  const { app, $, $$, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  button('strategy drill').click();
+
+  assert.ok(app.strategyDrill, 'drill was not created');
+  assert.ok($('.strategy__ask'), 'no question was posed');
+  assert.ok($$('.card').length >= 3, 'spot was not dealt');
+
+  // Answer with a deliberately terrible play and check the coaching appears
+  app.strategyDrill.hand = { total: 20, soft: false, pairValue: null, cardCount: 2 };
+  app.strategyDrill.up = 6;
+  app.strategyDrill.answer('hit');
+
+  assert.ok($('.verdict.is-wrong'), 'a bad play was not marked wrong');
+  assert.equal($('.verdict__word').textContent, 'WRONG');
+  assert.ok($('.verdict__best').textContent.length > 0, 'no optimal play shown');
+  assert.ok($('.verdict__cost').textContent.includes('%'), 'no EV cost shown');
+  assert.ok($('.verdict__reason').textContent.length > 10, 'no reason given');
+  assert.ok($('.verdict__tip').textContent.length > 10, 'no tip given');
+
+  app.strategyDrill.destroy(true);
+  assert.equal(app.strategyDrill, null);
+  assert.ok($('.felt'), 'table was not restored on exit');
+  app._stopTimer();
+});
+
+test('the strategy drill confirms a correct answer', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  button('strategy drill').click();
+
+  app.strategyDrill.hand = { total: 20, soft: false, pairValue: null, cardCount: 2 };
+  app.strategyDrill.up = 6;
+  app.strategyDrill.answer('stand');
+
+  assert.ok($('.verdict.is-right'), 'a correct play was not confirmed');
+  assert.equal($('.verdict__word').textContent, 'CORRECT');
+  assert.equal(app.strategyDrill.streak, 1);
+
+  app.strategyDrill.destroy(true);
+  app._stopTimer();
+});
+
+test('drill results feed the strategy rating', async () => {
+  const { app, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  button('strategy drill').click();
+
+  app.strategyDrill.hand = { total: 20, soft: false, pairValue: null, cardCount: 2 };
+  app.strategyDrill.up = 6;
+  app.strategyDrill.answer('stand');
+
+  assert.ok(app.profile.modes.strategy.rating > 0, 'strategy rating did not move');
+  assert.equal(app.profile.modes.strategy.correct, 1);
+
+  app.strategyDrill.destroy(true);
+  app._stopTimer();
+});
+
+test('The Book renders a full chart matching the rules', async () => {
+  const { app, $, $$, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  button('the book').click();
+
+  assert.ok($('.book__table'), 'no chart rendered');
+  assert.equal($$('.book__section').length, 3, 'expected hard, soft and pair sections');
+  assert.ok($$('.book__cell--P').length > 0, 'chart has no split cells');
+  assert.ok($$('.book__cell--D').length > 0, 'chart has no double cells');
+
+  // With surrender off, neither the chart nor the legend should mention it
+  app.settings.allowSurrender = false;
+  app._openBook();
+  assert.equal(
+    $$('.book__table .book__cell--R').length, 0,
+    'chart still recommends surrender when the rules forbid it'
+  );
+  assert.equal($$('.book__legend .book__cell--R').length, 0, 'legend still lists surrender');
+
+  app._stopTimer();
+});
+
+test('the casino test runs on hard settings and banks nothing', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+
+  const easyRatingBefore = app.profile.modes.easy.rating;
+
+  button('menu').click();
+  button('casino test').click();
+  button('begin test').click();
+
+  assert.ok(app.exam, 'exam did not start');
+  assert.equal(app.settings.showCount, false, 'exam should run with the count hidden');
+  assert.equal(app.settings.showHandTotals, false);
+  assert.equal(app.settings.numberOfDecks, 6);
+
+  // Grade some decisions; none should reach the player's lifetime record
+  app._recordRating({ correct: true, kind: 'play' });
+  app._recordRating({ correct: false, kind: 'play' });
+
+  assert.equal(app.exam.events.length, 2);
+  assert.equal(app.profile.modes.easy.rating, easyRatingBefore, 'exam leaked into easy rating');
+  assert.equal(app.profile.modes.hard.decisions, 0, 'exam leaked into hard rating');
+
+  app._stopTimer();
+});
+
+test('finishing the test reports a grade and restores settings', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  button('casino test').click();
+  button('begin test').click();
+
+  // A clean sheet of 25 decisions
+  for (let i = 0; i < 25; i++) app._recordRating({ correct: true, kind: 'play' });
+  app._recordRating({ correct: true, kind: 'count' });
+
+  app._finishExam();
+
+  assert.equal(app.exam, null, 'exam did not end');
+  assert.equal(app.settings.difficulty, 'easy', 'settings were not restored');
+  assert.equal(app.settings.showCount, true);
+
+  assert.ok($('.exam__grade'), 'no grade shown');
+  assert.equal($('.exam__grade').textContent, 'A');
+  assert.ok($('.exam__verdict').textContent.length > 10);
+  assert.equal(app.profile.exams.length, 1, 'result was not recorded');
+  assert.equal(app.profile.exams[0].grade, 'A');
+
+  app._stopTimer();
+});
+
+test('a sloppy test does not come back casino-ready', async () => {
+  const { app, $, button } = await mountApp(modeSettings('easy'));
+
+  button('menu').click();
+  button('casino test').click();
+  button('begin test').click();
+
+  for (let i = 0; i < 15; i++) app._recordRating({ correct: true, kind: 'play' });
+  for (let i = 0; i < 10; i++) app._recordRating({ correct: false, kind: 'play' });
+
+  app._finishExam();
+
+  assert.equal(app.profile.exams[0].ready, false);
+  assert.ok(['C', 'D', 'F'].includes($('.exam__grade').textContent));
+
+  app._stopTimer();
+});
+
+test('players can be added and switched from the menu', async () => {
+  const { app, $, $$, button } = await mountApp(modeSettings('easy'));
+
+  const firstId = app.profile.id;
+
+  button('menu').click();
+  button('players').click();
+  assert.ok($('.player'), 'player list did not render');
+
+  $('.sheet input[type="text"]').value = 'Marcus';
+  button('add').click();
+
+  assert.notEqual(app.profile.id, firstId, 'did not switch to the new player');
+  assert.equal(app.profile.name, 'Marcus');
+
+  app._stopTimer();
+});
+
+test('ratings are shown per mode', async () => {
+  const { app, $, $$, button } = await mountApp(modeSettings('easy'));
+
+  app.profile.modes.normal.rating = 400;
+
+  button('menu').click();
+  button('ratings').click();
+
+  assert.ok($('.rating'), 'ratings did not render');
+  assert.ok($$('.rating').length >= 6, 'expected an overall plus per-mode ratings');
+  assert.ok($('.rating__tier').textContent.length > 0, 'no tier name shown');
+
+  app._stopTimer();
+});
